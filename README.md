@@ -56,3 +56,9 @@ If you prefer a web version:
 ```bash
 asciidoctor index.adoc
 ```
+
+## Support
+
+If you found this guide helpful, consider supporting the project:
+
+<a href="https://buymeacoffee.com/swamirama" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" style="height: 60px !important;width: 217px !important;" ></a>
