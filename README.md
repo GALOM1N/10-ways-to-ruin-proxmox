@@ -8,7 +8,7 @@ This guide bridges the gap between "it works" and "it works reliably."
 Most Proxmox tutorials show you how to click through the installer, but they don't tell you **why your VMs feel sluggish** on that shiny new RAIDZ pool, or **why your cluster locked up** when you unplugged one node.
 
 **You will learn:**
-1.  **Storage Architecture:** Why RAIDZ kills VM performance and why ZFS often needs less RAM than commonly claimed (when designed correctly)..
+1.  **Storage Architecture:** Why RAIDZ kills VM performance and why ZFS needs more RAM than the popular "1 GB per TB" rule suggests.
 2.  **High Availability:** Why enabling HA on 2 nodes guarantees downtime (and how to fix it).
 3.  **Operations:** How to backup correctly, why Docker belongs in a VM, and how to monitor the silence before the crash.
 
