@@ -27,4 +27,32 @@ The book is written in **AsciiDoc**.
 
 ## Building
 
-(Add build instructions here, e.g., using `asciidoctor-pdf`)
+To build the PDF, you need **Asciidoctor PDF** installed.
+
+### Prerequisites
+
+You can install the necessary tools via Homebrew (macOS) or Ruby Gems.
+
+```bash
+# macOS (Homebrew)
+brew install asciidoctor
+
+# Or via Gems
+gem install asciidoctor-pdf
+```
+
+### Compile PDF
+
+Run the following command in the root directory:
+
+```bash
+asciidoctor-pdf index.adoc -o "10_Ways_to_Ruin_Your_Proxmox_Setup.pdf"
+```
+
+### Compile HTML
+
+If you prefer a web version:
+
+```bash
+asciidoctor index.adoc
+```
