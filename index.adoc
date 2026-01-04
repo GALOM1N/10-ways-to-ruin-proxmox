@@ -1,0 +1,38 @@
+= 10 Ways to Ruin Your Proxmox Setup - And How Not To
+:author: Manuel <manuel@unitedbots.net>
+:revnumber: 1.0
+:revdate: 2025-12-09
+:revremark: First public release
+:keywords: Proxmox, virtualization, ZFS, HA, backups, homelab
+:lang: en
+:doctype: book
+:imagesdir: images
+:front-cover-image: image:cover.png[]
+:notitle:
+:sectnums:
+:toc: left
+:toclevels: 2
+
+include::chapters/01-introduction.adoc[]
+
+include::chapters/02-chapter-1-zfs-without-proper-ram-planning.adoc[]
+
+include::chapters/03-chapter-2-ecc-ram-is-mandatory-for-zfs.adoc[]
+
+include::chapters/04-chapter-3-using-raidz-for-vm-storage.adoc[]
+
+include::chapters/05-chapter-4-dismissing-local-lvm-as-inflexible.adoc[]
+
+include::chapters/06-chapter-5-always-using-the-host-cpu-type.adoc[]
+
+include::chapters/07-chapter-6-configuring-ha-without-meeting-the-prerequisites.adoc[]
+
+include::chapters/08-chapter-7-incomplete-or-missing-backup-strategy.adoc[]
+
+include::chapters/09-chapter-8-running-docker-directly-on-the-proxmox-host.adoc[]
+
+include::chapters/10-chapter-9-no-monitoring-for-nodes-storage-and-backups.adoc[]
+
+include::chapters/11-chapter-10-deploying-services-directly-on-the-proxmox-host.adoc[]
+
+include::chapters/12-conclusion.adoc[]

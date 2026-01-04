@@ -1,0 +1,237 @@
+== Always Using the "`host`" CPU Type
+
+When configuring a new VM in Proxmox, you'll encounter a dropdown menu
+for the CPU type. Among the options, "`host`" stands out as the obvious
+choice - it passes through your physical CPU's full feature set to the
+VM, promising maximum performance with zero artificial limitations. Why
+would you ever choose anything else?
+
+As it turns out, there are some very good reasons. And if you're running
+a cluster, choosing "`host`" without understanding the implications
+might leave you staring at a failed migration at the worst possible
+moment.
+
+==== The Appeal of "`host`"
+
+The "`host`" CPU type is seductive because it makes intuitive sense.
+Your physical CPU has a specific set of capabilities - instruction set
+extensions like AVX, AVX2, AVX-512, AES-NI, and dozens of others that
+have accumulated over generations of processor development. These
+extensions can significantly accelerate certain workloads, from
+encryption to scientific computing to video encoding.
+
+When you select "`host,`" Proxmox tells QEMU to present all of these
+capabilities directly to the VM. The guest operating system sees exactly
+what's available on the physical hardware and can take full advantage of
+it. No translation layer, no artificial restrictions, just raw CPU
+power.
+
+For a single-node setup, this is genuinely the optimal choice. You
+bought that CPU with all its fancy features; you might as well use them.
+Performance-sensitive workloads will thank you, and there's no downside
+when migration isn't in the picture.
+
+The problems begin when you add a second node to the equation.
+
+==== The Migration Trap
+
+https://en.wikipedia.org/wiki/Live_migration[Live migration] is one of
+the most powerful features of modern virtualization. The ability to move
+a running VM from one physical host to another without downtime enables
+maintenance without service interruption, load balancing across your
+cluster, and graceful handling of hardware issues. It's the foundation
+of true high availability.
+
+But live migration has a fundamental requirement that's easy to
+overlook: the destination host must support every CPU feature that the
+VM is currently using. Not "`most of them`" or "`the important ones`" -
+every single one.
+
+Here's where "`host`" becomes dangerous. When a VM starts on a host with
+a newer CPU, it discovers and potentially starts using all available
+features. The guest kernel loads optimized code paths, applications
+detect and utilize advanced instructions, and everything runs
+beautifully. Then you try to migrate that VM to a node with an older CPU
+that lacks some of those features.
+
+The migration fails. Sometimes with a clear error message, sometimes
+with a cryptic QEMU complaint, and occasionally the VM just crashes on
+the destination host because it tried to execute an instruction that
+doesn't exist. None of these outcomes are pleasant, especially if you're
+migrating because the source host is having problems and you need that
+VM running somewhere else immediately.
+
+==== It's Not Just About CPU Generations
+
+You might think this is only a concern if you're mixing wildly different
+hardware - say, a decade-old server with a brand-new workstation. But
+CPU feature mismatches can occur in surprisingly subtle situations.
+
+Even within the same CPU generation from the same manufacturer,
+different models can have different feature sets. A Xeon might have
+features that an equivalent-era Core processor lacks. Microcode updates
+can enable or disable features. Even two seemingly identical systems
+might report different capabilities if one has newer firmware.
+
+The situation becomes even more complex if you're mixing Intel and AMD
+processors in the same cluster. While both support the common x86-64
+instruction set, their extensions diverge significantly. A VM configured
+with "`host`" on an Intel system simply cannot migrate to an AMD system,
+and vice versa - the feature sets are fundamentally incompatible.
+
+==== Understanding CPU Models in Proxmox
+
+Proxmox offers several predefined CPU models that represent standardized
+feature sets rather than specific physical processors. These models
+define a consistent set of capabilities that the VM will see, regardless
+of what the underlying hardware actually supports (as long as it
+supports at least those features).
+
+You can see what's available on your system:
+
+[source,bash]
+----
+# View available CPU models (from QEMU)
+cat /usr/share/pve-qemu-kvm/cpu-models.conf
+
+# Or check the Proxmox documentation for the full list:
+# https://pve.proxmox.com/pve-docs/pve-admin-guide.html#chapter_qm_vcpu_list
+----
+
+Since Proxmox VE 8.0, the default CPU type when creating a new VM through
+the web interface is *x86-64-v2-AES*, which adds hardware AES acceleration
+on top of the v2 feature set. This is a sensible middle ground for most
+clusters.
+
+[cols=",,",options="header",]
+|===
+|Model |Minimum CPU |Notes
+|x86-64-v2 |Intel Nehalem (2008) / AMD Opteron G3 |SSE4.2, POPCNT - very broad compatibility
+|x86-64-v3 |Intel Haswell (2013) / AMD Excavator (2015) |AVX2, FMA - note: some Intel Atom CPUs lack this
+|x86-64-v4 |Intel Skylake-SP Server (2017) / AMD Zen 4 (2022) |AVX-512 - *not* available on Intel consumer CPUs since Alder Lake
+|===
+
+These models correspond to the
+https://en.wikipedia.org/wiki/X86-64#Microarchitecture_levels[x86-64
+microarchitecture levels] defined by processor vendors, providing a
+standardized way to specify "`at least this capable`" without tying
+yourself to specific hardware.
+
+==== Checking Your Cluster's CPU Features
+
+Before deciding on a CPU model for your cluster, it's worth
+understanding exactly what each node supports. You can compare feature
+sets across your nodes:
+
+[source,bash]
+----
+# Show CPU flags on the current node
+lscpu | grep Flags
+
+# Or more readable, one flag per line
+cat /proc/cpuinfo | grep flags | head -1 | tr ' ' '\n' | sort
+----
+
+For a quick comparison between nodes, you can extract just the flags and
+diff them:
+
+[source,bash]
+----
+# On each node, save flags to a file
+cat /proc/cpuinfo | grep flags | head -1 | tr ' ' '\n' | sort > /tmp/cpu_flags_$(hostname).txt
+
+# Then compare between nodes
+diff /tmp/cpu_flags_node1.txt /tmp/cpu_flags_node2.txt
+----
+
+Any flags that appear on one node but not another represent potential
+migration failures if you're using the "`host`" CPU type.
+
+==== Finding the Right Balance
+
+The choice of CPU model is ultimately a tradeoff between performance and
+flexibility. The "`host`" setting maximizes performance but eliminates
+migration compatibility. The conservative models like x86-64-v2 maximize
+compatibility but leave some performance on the table. Your job is to
+find the right balance for your environment.
+
+For single-node installations, there's no tradeoff to make. Use "`host`"
+and enjoy full performance. Migration isn't a concern, so there's no
+reason to artificially limit your VMs.
+
+For homogeneous clusters where every node has truly identical hardware -
+same CPU model, same microcode version, same BIOS settings - the
+"`host`" type can work safely. However, "`truly identical`" is a strong
+requirement that becomes harder to maintain over time as you replace
+failed hardware or expand your cluster.
+
+For heterogeneous clusters, which is what most real-world clusters
+eventually become, you'll want to choose a CPU model based on your
+oldest or least-capable node. This ensures that any VM can migrate to
+any node at any time. 
+
+The x86-64-v2-AES model (the Proxmox 8+ default) is the safest choice
+for mixed environments. If all your nodes have CPUs from 2013 or newer
+with confirmed AVX2 support, x86-64-v3 offers additional vector
+instructions that can benefit numerical workloads.
+
+
+
+==== Changing CPU Type on Existing VMs
+
+If you've already deployed VMs with the "`host`" CPU type and want to
+change them for better migration compatibility, you can modify the
+setting without recreating the VM:
+
+[source,bash]
+----
+# Check current CPU configuration
+qm config <vmid> | grep cpu
+
+# Change to a specific model
+qm set <vmid> --cpu x86-64-v3
+----
+
+Note that the VM needs to be stopped and restarted (not just rebooted
+from inside the guest) for CPU model changes to take effect. The guest
+operating system will detect the "`new`" CPU features on the next boot,
+which is usually seamless but occasionally requires reinstalling
+CPU-optimized software.
+
+==== Best Practices
+
+For single-node setups, feel free to use "`host`" and extract maximum
+performance from your hardware. There's no migration to worry about, so
+there's no reason to compromise.
+
+When building a cluster, decide on your CPU model strategy before
+deploying VMs, not after. Changing CPU types later is possible but
+disruptive, and you might encounter compatibility issues with software
+that was compiled or optimized for features that are no longer
+available.
+
+For clusters with mixed hardware, identify the lowest common denominator
+and configure all VMs to use that feature level. Yes, this means your
+newest, most powerful node won't be fully utilized - but it also means
+you can migrate VMs freely without nasty surprises.
+
+Document your cluster's CPU model policy somewhere visible. Future you,
+or whoever inherits your infrastructure, will appreciate knowing why
+things are configured the way they are and what constraints apply when
+adding new nodes.
+
+==== The Bottom Line
+
+The "`host`" CPU type isn't wrong - it's just not universally
+appropriate. In a single-node setup, it's the right choice. In a
+cluster, it's a decision that trades migration flexibility for
+performance, and you should make that trade consciously rather than by
+default.
+
+Understand what your cluster actually looks like, choose a CPU model
+that works across all your nodes, and save yourself the frustration of
+discovering feature incompatibilities during an emergency migration at 3
+AM. A few percentage points of CPU performance aren't worth that
+headache.
+
+'''''

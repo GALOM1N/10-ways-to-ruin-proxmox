@@ -1,0 +1,123 @@
+:sectnums!:
+
+Proxmox VE has become one of the most popular virtualization platforms
+for good reason. It's powerful, flexible, open source, and capable of
+running everything from a small homelab to serious production
+infrastructure. The web interface is intuitive, the documentation is
+solid, and the community is active and helpful.
+
+And yet, Proxmox environments fail. VMs become sluggish for no apparent
+reason. Clusters split-brain during maintenance windows. Backups turn
+out to be useless when you actually need them. Storage pools degrade
+silently until a second disk failure turns inconvenience into
+catastrophe.
+
+These failures rarely stem from bugs in Proxmox itself. Instead, they
+grow from decisions made during setup and configuration - decisions that
+seemed reasonable at the time but were based on incomplete
+understanding, outdated advice, or assumptions that didn't match
+reality. The gap between "`it works`" and "`it works reliably`" is
+filled with hard-won knowledge that most of us acquire the painful way:
+by experiencing failures firsthand.
+
+This guide exists to help you skip some of that pain.
+
+=== Who This Guide Is For
+
+Whether you're running a homelab in your basement, managing
+infrastructure for a small business, or consulting for clients who need
+reliable virtualization, this guide addresses the mistakes that matter
+in your world. We're not talking about exotic edge cases or theoretical
+concerns - we're talking about the issues that actually break systems
+and ruin weekends.
+
+The assumed baseline is basic familiarity with Proxmox and Linux
+administration. You don't need to be an expert, but you should be
+comfortable with the command line and understand what terms like VM,
+container, and storage pool mean. If you've set up Proxmox at least once
+and gotten it running, you're ready for this material.
+
+=== What You'll Learn
+
+This guide covers ten common mistakes, each explored in enough depth to
+understand not just what to do, but why it matters:
+
+*Storage fundamentals* - why ZFS needs more RAM than you think, why the
+ECC debate is mostly noise, and why RAIDZ might be the wrong choice for
+your VM workloads.
+
+*Configuration decisions* - understanding when Local-LVM makes sense
+again, why the "`host`" CPU type can sabotage your cluster, and what
+High Availability actually requires to function.
+
+*Operational practices* - building a backup strategy that actually
+protects you, keeping Docker off your hypervisor, implementing
+monitoring that catches problems early, and maintaining the discipline
+to keep your Proxmox host clean.
+
+Each chapter stands on its own, so feel free to jump to the topics most
+relevant to your situation. That said, reading through sequentially will
+give you a coherent picture of what a well-designed Proxmox environment
+looks like and why each piece matters.
+
+=== A Note on Advice
+
+Technology advice ages poorly. What was best practice five years ago
+might be outdated today, and what's current now will eventually be
+superseded. Proxmox itself evolves - features that were problematic in
+version 7 might work flawlessly in version 9.
+
+This guide reflects the state of Proxmox VE as of 2025, with particular
+attention to changes in recent versions. Where historical context
+matters - like the improvements to Local-LVM snapshots in PVE 9 - we'll
+note it explicitly. But always verify that advice still applies to your
+specific version before implementing changes in production.
+
+More importantly, understand the reasoning behind each recommendation.
+Technology changes, but the underlying principles - defense in depth,
+separation of concerns, knowing your failure modes - remain constant. If
+you understand why a practice is recommended, you'll be able to adapt
+when circumstances differ from what any guide anticipates.
+
+=== Disclaimer
+
+The material in this book is guidance, not a guarantee. Every
+environment is different; you are responsible for validating changes in
+your own lab before production and for ensuring compliance with your
+organization's policies and applicable laws.
+
+*No warranties.* All advice is provided "as is" without warranty of any
+kind. Apply it at your own risk.
+
+*Test first.* Reproduce steps in a non-production lab, make and verify
+backups, and have rollback plans before touching live systems.
+
+*Security and compliance.* Verify that any suggested configuration meets
+your security baselines, logging/monitoring requirements, and regulatory
+obligations (e.g., data protection, industry standards).
+
+*Vendor documentation prevails.* Always cross-check against current
+Proxmox, distro, firmware, and hardware vendor documentation; if they
+conflict, follow the vendor.
+
+*Get professional help when needed.* For business-critical workloads,
+engage qualified professionals and follow formal change-management.
+
+=== Let's Begin
+
+Proxmox is capable of remarkable reliability when configured
+thoughtfully. The difference between an environment that runs smoothly
+for years and one that generates constant firefighting often comes down
+to decisions made during initial setup - decisions you might not realize
+were wrong until much later.
+
+The goal of this guide is to help you make better decisions from the
+start, or to recognize and correct problematic patterns in existing
+environments before they cause serious trouble.
+
+Let's look at the first mistake: underestimating what ZFS really needs
+to run well.
+
+'''''
+
+:sectnums:

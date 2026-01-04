@@ -1,0 +1,352 @@
+== Configuring HA Without Meeting the Prerequisites
+
+"`We have two nodes, so let's enable HA.`" This sentence has been the
+starting point for countless frustrating debugging sessions. High
+Availability sounds like exactly what you want - automatic failover when
+something goes wrong. But enabling HA without understanding its
+requirements doesn't give you reliability; it gives you a new category
+of problems.
+
+==== What HA Actually Means in Proxmox
+
+Before diving into the pitfalls, let's clarify what Proxmox's HA system
+actually does. When you mark a VM or container as "`HA managed,`" you're
+telling the cluster to monitor that workload and automatically restart
+it on a different node if the current node becomes unavailable. The
+cluster watches for node failures and takes action without human
+intervention.
+
+This sounds straightforward, but the mechanism that makes it work - and
+the reason for the strict requirements - is the concept of
+https://en.wikipedia.org/wiki/Quorum_(distributed_computing)[quorum].
+
+==== The Quorum Problem
+
+Proxmox uses
+https://en.wikipedia.org/wiki/Corosync_Cluster_Engine[Corosync] for
+cluster communication and membership management. Corosync implements a
+voting system where each node gets one vote, and the cluster can only
+operate when a majority of votes - more than 50% - are present. This
+majority is called quorum.
+
+Why does this matter? Imagine a two-node cluster where the network
+connection between the nodes fails. From each node's perspective, the
+other node has disappeared. Without quorum rules, both nodes would
+conclude that the other has failed and attempt to start the HA-managed
+VMs. You'd end up with the same VM running on both nodes simultaneously,
+potentially writing to shared storage from two places at once. This is
+called a
+https://en.wikipedia.org/wiki/Split-brain_(computing)[split-brain
+scenario], and it can corrupt your data beyond recovery.
+
+Quorum prevents this by requiring a majority to act. But here's the math
+problem with two nodes: if one fails or becomes unreachable, the
+remaining node has exactly 1 out of 2 votes - that's 50%, not a
+majority. The surviving node cannot achieve quorum, so HA services won't
+failover. Your cluster becomes completely paralyzed.
+
+This isn't a bug; it's the system working as designed to prevent
+split-brain. But it means that a two-node cluster with HA enabled is
+actually less reliable than no HA at all, because a single node failure
+takes down everything instead of just half your workloads.
+
+==== The Three-Node Minimum
+
+The official Proxmox recommendation is a minimum of three nodes for HA,
+and the math explains why. With three nodes and three votes, losing one
+node leaves two votes - still a majority. The cluster maintains quorum,
+and HA can function properly. Workloads from the failed node migrate to
+the survivors, and your services stay online.
+
+This extends to larger clusters as well. A five-node cluster can survive
+two simultaneous failures. Seven nodes can lose three. The formula is
+simple: a cluster with N nodes can tolerate (N-1)/2 failures, rounded
+down.
+
+NOTE: When using a QDevice with an odd number of nodes, the behavior
+changes significantly. The QDevice provides (N-1) votes in that case,
+which allows all but one node to fail - but if the QDevice itself fails,
+no additional node failures are tolerated. For this reason, Proxmox
+recommends QDevices only for even-numbered clusters.
+
+==== The QDevice Alternative
+
+Not everyone can justify three full Proxmox nodes. Hardware costs money,
+uses power, and takes up space. For environments where a third node
+isn't practical, Proxmox supports an alternative: the QDevice.
+
+A
+https://pve.proxmox.com/wiki/Cluster_Manager#_corosync_external_vote_support[QDevice]
+is a lightweight arbitrator that provides an additional vote without
+being a full cluster member. It can run on minimal hardware - a
+Raspberry Pi, a small VM on a separate hypervisor, or even your NAS if
+it runs Linux. The QDevice doesn't run VMs or store data; it just
+participates in quorum decisions.
+
+IMPORTANT: The QDevice must run on hardware that is physically separate
+from your cluster nodes. Running a QDevice as a VM on one of your
+cluster nodes defeats the entire purpose - if that node fails, you lose
+both the node's vote and the QDevice's vote.
+
+With two Proxmox nodes plus a QDevice, you have three votes. If one
+Proxmox node fails, the remaining node plus the QDevice still have two
+out of three votes - a majority. HA can now function correctly.
+
+Setting up a QDevice requires a host running the `corosync-qnetd`
+daemon:
+
+[source,bash]
+----
+# On the QDevice host (any Debian/Ubuntu system, Raspberry Pi, etc.)
+apt update
+apt install corosync-qnetd
+
+# On one of your Proxmox nodes
+pvecm qdevice setup <qdevice-ip-address>
+----
+
+After setup, verify the configuration:
+
+[source,bash]
+----
+# Check cluster status including QDevice
+pvecm status
+
+# Verify quorum votes - should show 3 total votes
+corosync-quorumtool
+----
+
+You should see three votes total: one from each Proxmox node and one
+from the QDevice. The QDevice status shows flags like `A,V,NMW` where
+`A` means Alive and `V` means it's casting a Vote.
+
+==== Fencing: The Other Half of HA
+
+Quorum determines whether the cluster can act.
+https://en.wikipedia.org/wiki/Fencing_(computing)[Fencing] determines
+how it acts. When a node is declared dead and its workloads need to move
+elsewhere, the cluster must be absolutely certain that the failed node
+won't suddenly come back and try to access shared resources.
+
+===== Watchdog-Based Self-Fencing (Default)
+
+Proxmox uses watchdog-based self-fencing by default. This is simpler
+and often more reliable than external fencing mechanisms. Here's how
+it works:
+
+1. The `pve-ha-lrm` service continuously resets a watchdog timer
+2. If a node loses quorum for approximately 60 seconds, the service
+   stops resetting the watchdog
+3. The watchdog triggers and reboots the node
+4. When the node comes back up, it won't have quorum and won't start
+   HA services, preventing split-brain
+
+The Linux kernel's software watchdog (softdog) is enabled by default -
+no installation or configuration required. This is intentional and
+works well for most environments.
+
+[source,bash]
+----
+# Verify watchdog is active (look for watchdog-mux)
+systemctl status watchdog-mux
+
+# Check which watchdog module is loaded
+cat /etc/default/pve-ha-manager
+----
+
+===== Hardware Watchdog (Optional)
+
+For higher reliability, you can use a hardware watchdog if your server
+supports one. Hardware watchdogs are independent of the operating system
+and will trigger even if the kernel crashes.
+
+[source,bash]
+----
+# Edit the HA manager configuration
+nano /etc/default/pve-ha-manager
+
+# Uncomment and set the appropriate module for your hardware:
+# Intel servers: iTCO_wdt
+# HP servers: hpwdt
+# Dell with IPMI: ipmi_watchdog
+WATCHDOG_MODULE=iTCO_wdt
+----
+
+After changing the watchdog module, restart the watchdog-mux service:
+
+[source,bash]
+----
+systemctl restart watchdog-mux
+----
+
+===== External Fencing (STONITH)
+
+For environments requiring active fencing - where surviving nodes
+forcibly power off the failed node rather than waiting for self-fencing
+- Proxmox supports hardware fence devices through IPMI, iDRAC, iLO, or
+managed PDUs.
+
+[source,bash]
+----
+# Check current fencing mode
+grep fencing /etc/pve/datacenter.cfg
+
+# View hardware fencing configuration (if configured)
+cat /etc/pve/ha/fence.cfg
+----
+
+To enable hardware fencing, install the fence agents and configure
+your devices:
+
+[source,bash]
+----
+# Install fence agents
+apt install fence-agents
+
+# Configure via GUI: Datacenter → HA → Fencing → Add
+# Or set the mode in datacenter.cfg:
+# fencing: hardware
+# fencing: both    (uses watchdog AND hardware fencing)
+----
+
+For homelab environments without IPMI or out-of-band management, the
+default watchdog-based self-fencing is typically sufficient and more
+reliable than attempting to configure complex external fencing.
+
+==== Network Redundancy
+
+HA depends entirely on cluster communication. If Corosync can't reach
+other nodes, it assumes they're dead - even if they're perfectly healthy
+and just unreachable due to a network issue. A single network failure
+shouldn't trigger HA failovers and potentially cause the split-brain
+scenario that quorum is designed to prevent.
+
+The solution is redundant networks for cluster communication. Proxmox
+supports multiple Corosync links, allowing you to define separate
+network paths:
+
+[source,bash]
+----
+# View current Corosync configuration
+cat /etc/pve/corosync.conf
+----
+
+When setting up a cluster, you can specify multiple links:
+
+[source,bash]
+----
+# When joining a cluster with redundant links
+pvecm add <existing-node> --link0 <ip-link0> --link1 <ip-link1>
+----
+
+Ideally, these links should use physically separate networks - different
+switches, different subnets, maybe even different network interface
+cards. The goal is eliminating single points of failure in cluster
+communication.
+
+TIP: For critical environments, consider using dedicated network
+interfaces for Corosync traffic, separate from VM traffic and storage
+networks. This prevents heavy VM network usage from impacting cluster
+communication.
+
+==== Testing Before Production
+
+HA configurations should be tested before you rely on them. This means
+actually simulating failures and verifying that failover works as
+expected.
+
+[%unbreakable]
+[source,bash]
+----
+# Check HA status
+ha-manager status
+
+# View HA resource configuration
+cat /etc/pve/ha/resources.cfg
+
+# View HA groups
+cat /etc/pve/ha/groups.cfg
+
+# Check cluster health
+pvecm status
+----
+
+Test scenarios should include:
+
+* *Graceful shutdown*: Shut down a node cleanly and verify VMs migrate
+  to surviving nodes. This tests the basic HA mechanism.
+
+* *Hard power-off*: Pull the power cord (or use IPMI to force power off)
+  to simulate sudden hardware failure. The remaining nodes should detect
+  the failure and restart services after the fencing timeout (~2
+  minutes with watchdog fencing).
+
+* *Network disconnect*: Unplug the cluster network cable from one node.
+  The isolated node should self-fence (reboot) after losing quorum. This
+  is the most important test for split-brain prevention.
+
+* *QDevice failure*: If using a QDevice, shut it down while all Proxmox
+  nodes are healthy. The cluster should continue operating. Then test
+  what happens if a Proxmox node fails while the QDevice is down.
+
+WARNING: Always test in a maintenance window with proper backups. Test
+with non-critical VMs first. Never test by disconnecting storage - that
+can cause data corruption regardless of HA status.
+
+Don't wait for a real failure to discover that your HA configuration
+doesn't actually work. By then, you'll be dealing with an outage and
+trying to debug complex cluster behavior under pressure.
+
+==== Common Pitfalls
+
+*Ignoring the two-minute timeout*: Watchdog-based fencing has an
+intentional delay of approximately two minutes. This is not a bug - it's
+necessary to ensure the failed node has truly fenced itself before
+services restart elsewhere. Don't try to reduce this timeout; it exists
+to prevent split-brain.
+
+*Running QDevice on cluster storage*: If your QDevice VM's storage is on
+the Proxmox cluster itself, a storage failure takes down both your
+cluster and your quorum arbitrator simultaneously.
+
+*Single network for everything*: Using one network for Corosync, VM
+traffic, and storage means any network congestion can trigger false HA
+failovers. Separate your traffic.
+
+*Not testing after changes*: Any change to cluster configuration,
+network setup, or storage should be followed by HA testing. What worked
+before might not work after the change.
+
+==== Best Practices
+
+Only enable HA when you've genuinely met the prerequisites. Three nodes
+minimum, or two nodes with a properly configured QDevice. Anything less
+isn't HA - it's a configuration that will make failures worse.
+
+Understand your fencing mechanism before enabling HA on production
+workloads. Know whether you're using software watchdog, hardware
+watchdog, or external fencing, and understand the implications of each.
+
+Use redundant networks for Corosync communication. A single switch
+failure shouldn't take down your entire cluster or trigger unnecessary
+failovers.
+
+Test your HA setup by actually causing failures in a controlled manner.
+Verify that failover works, that fencing triggers correctly, and that
+services come back up on surviving nodes. Document the expected behavior
+so you know what "`working correctly`" looks like.
+
+Monitor your cluster continuously. Set up alerts for quorum issues,
+fencing events, and HA state changes. Problems with HA often start as
+intermittent issues that become critical failures if ignored.
+
+==== The Bottom Line
+
+High Availability requires actual redundancy, not just a checkbox in the
+Proxmox interface. Two nodes without a QDevice isn't an HA cluster; it's
+a cluster that will lock up completely when you need HA most. Meet the
+prerequisites, test your configuration, and understand the mechanisms
+involved. Only then does HA deliver on its promise of keeping your
+services running through hardware failures.
+
+'''''

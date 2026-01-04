@@ -1,0 +1,270 @@
+== Using RAIDZ for VM Storage
+
+RAIDZ is one of ZFS's most appealing features for anyone planning
+storage infrastructure. The promise is compelling: combine multiple
+disks into a pool that survives disk failures while maximizing usable
+capacity. Unlike traditional RAID, ZFS handles everything in software
+with no special controller required. You get redundancy, you get
+capacity efficiency, and you get all the other ZFS benefits like
+checksumming and snapshots.
+
+On paper, RAIDZ looks like the obvious choice for a Proxmox storage
+pool. Why waste half your disks on mirrors when RAIDZ1 loses only one
+disk to parity, or RAIDZ2 just two? The storage efficiency calculators
+make it look like free space you'd be foolish to leave on the table.
+
+And then you actually try running VMs on it.
+
+==== The Day I Learned This Lesson
+
+When I built my first "`serious`" Proxmox server, I was proud of my
+storage design. Six disks in RAIDZ2, giving me four disks worth of
+usable space while surviving any two simultaneous disk failures. The
+redundancy math was solid. The capacity was generous. The ZFS pool
+creation went smoothly and looked beautiful in the web interface.
+
+Then I started actually using it for VMs. The performance wasn't
+terrible, exactly - VMs booted, applications ran, files saved. But
+everything felt slightly sluggish in a way I couldn't quite pin down.
+Database operations that should have been instant had noticeable
+latency. Multiple VMs doing disk-intensive work simultaneously brought
+the system to its knees. The numbers on my capacity calculator hadn't
+warned me about any of this.
+
+It took embarrassingly long to understand what was happening, because
+nothing was actually broken. The system was working exactly as designed.
+The problem was that RAIDZ is designed for a different kind of workload
+than VMs generate.
+
+==== Why RAIDZ and VMs Don't Mix
+
+The root issue comes down to how
+https://en.wikipedia.org/wiki/Standard_RAID_levels#RAID_5[RAID parity]
+works and what kind of I/O patterns virtual machines create.
+
+RAIDZ distributes data and parity across all disks in the vdev. When you
+write data, ZFS must calculate parity information and write both the
+data and parity to multiple disks. When you modify existing data, ZFS
+must read the old data, read the old parity, calculate new parity based
+on the changes, then write the new data and new parity. This is the
+classic RAID write penalty, and for small random writes, it's
+significant.
+
+Virtual machines are small random write machines. The guest operating
+system has its own filesystem, its own caching, its own access patterns,
+and none of them know or care that they're running on top of ZFS. A VM
+doing ordinary work - booting up, running applications, saving files -
+generates a stream of small, random I/O operations scattered across its
+virtual disk. This is exactly the workload that RAIDZ handles worst.
+
+The counterintuitive result is that a RAIDZ vdev with six disks delivers
+random IOPS roughly equivalent to a single disk. Your beautiful six-disk
+array, when handling the random I/O that VMs generate, performs like one
+disk. The other five disks are busy doing parity calculations and
+coordinated writes, but they're not multiplying your performance -
+they're just maintaining redundancy.
+
+For sequential workloads, RAIDZ performs much better. When you're
+writing large files continuously - streaming video, backup archives,
+sequential data transfers - the writes are large enough that the parity
+overhead is amortized across substantial data. This is why RAIDZ makes
+sense for backup storage, media libraries, and bulk file servers. But VM
+workloads are the opposite of sequential.
+
+==== The Mirror Alternative
+
+https://en.wikipedia.org/wiki/Standard_RAID_levels#RAID_1[Mirrored
+vdevs] work completely differently, and the difference matters
+enormously for VM performance.
+
+In a mirror, each disk in the pair contains a complete copy of the data.
+Writes go to both disks, but there's no parity calculation - just
+straightforward duplication. More importantly, reads can come from
+either disk, and ZFS is smart about distributing read requests across
+mirror members.
+
+If you have three mirror pairs (six disks total, like my RAIDZ2), reads
+scale with the number of disks. Each mirror can serve a read
+independently, and within each mirror, either disk can respond. For
+random read workloads, you're getting close to six disks worth of IOPS
+instead of one.
+
+Writes scale with the number of mirror pairs. Each pair operates
+independently, so three pairs can handle roughly three times the random
+write IOPS of a single disk. That's still not six times - mirrors write
+to both members - but it's dramatically better than RAIDZ's effective
+single-disk performance.
+
+The cost is capacity. Mirrors use 50% of your raw storage for
+redundancy, compared to RAIDZ1's one-disk overhead or RAIDZ2's two-disk
+overhead. Those capacity calculators that made RAIDZ look so attractive
+aren't lying - you genuinely get more usable space. The question is
+whether that space is worth the performance trade-off for your specific
+workload.
+
+==== Seeing the Difference
+
+If you're skeptical - and healthy skepticism about storage advice is
+appropriate - you can test this yourself. The `fio` tool generates I/O
+patterns that let you benchmark actual storage performance:
+
+[%unbreakable]
+[source,bash]
+----
+apt install fio
+
+# Random 4K read test - typical of VM read patterns
+fio --name=random-read \
+    --ioengine=libaio \
+    --direct=1 \
+    --bs=4k \
+    --iodepth=32 \
+    --rw=randread \
+    --size=1G \
+    --runtime=60 \
+    --filename=/path/to/your/pool/testfile
+
+# Random 4K write test - typical of VM write patterns
+fio --name=random-write \
+    --ioengine=libaio \
+    --direct=1 \
+    --bs=4k \
+    --iodepth=32 \
+    --rw=randwrite \
+    --size=1G \
+    --runtime=60 \
+    --filename=/path/to/your/pool/testfile
+----
+
+Run these tests on a RAIDZ pool and then on a mirror pool of similar
+total capacity. The random I/O numbers will tell a story that's hard to
+argue with. Sequential tests will show RAIDZ in a much better light,
+which is precisely the point - RAIDZ excels at sequential workloads and
+struggles with random ones.
+
+You can also observe this in production through ZFS's built-in
+monitoring:
+
+[source,bash]
+----
+# Watch I/O statistics in real-time
+zpool iostat -v 5
+----
+
+On a RAIDZ pool under VM load, you'll typically see all disks active but
+throughput limited by the parity overhead. On mirrors, you'll see the
+I/O distributed more effectively across the vdevs.
+
+==== The RAIDZ1 Rebuild Problem
+
+Beyond performance, there's another reason to be cautious with RAIDZ,
+particularly RAIDZ1: the resilver risk with modern disk sizes.
+
+When a disk fails in a RAIDZ pool, ZFS must rebuild the replacement disk
+by reading from all surviving disks and recalculating the missing data.
+This process - called resilvering - reads every byte from every
+remaining disk. With today's multi-terabyte drives, resilvering can take
+days.
+
+During the entire resilver, you're running without your expected
+redundancy. A RAIDZ1 pool resilvering after a single disk failure has
+zero fault tolerance until the rebuild completes. If another disk fails
+during those two or three days - or even just develops a few unreadable
+sectors that went unnoticed - you lose the pool.
+
+The math on this has gotten uncomfortable as disk sizes have grown. A 16
+TB disk takes far longer to resilver than a 1 TB disk did, but the
+expected lifetime and failure rates haven't improved proportionally. The
+window of vulnerability has stretched from hours to days, and the
+probability of a second failure during that window has increased
+accordingly.
+
+This is why experienced ZFS administrators often consider RAIDZ1
+obsolete for large disks. RAIDZ2 survives two failures, giving you
+meaningful protection during resilver operations. RAIDZ3 takes this
+further but costs three disks worth of capacity. But even RAIDZ2 and
+RAIDZ3 don't address the performance issue - they're still fundamentally
+limited by parity overhead for random I/O.
+
+Mirrors, by contrast, resilver quickly because they only need to copy
+data from the surviving disk to the replacement. A mirror resilver is
+essentially a single-disk read and single-disk write operation,
+completing in a fraction of the time a RAIDZ resilver takes.
+
+==== Designing Storage for Mixed Workloads
+
+The solution isn't to avoid RAIDZ entirely - it's to use the right
+storage topology for each workload. Most Proxmox environments have
+multiple distinct storage needs, and there's no reason they all need to
+use the same pool design.
+
+VM storage needs IOPS. The random I/O patterns of virtual machines
+demand storage that can handle many small operations per second. Mirrors
+deliver this, so use mirrors for your VM disks.
+
+Backup storage needs capacity and sequential throughput. Proxmox Backup
+Server writes large backup chunks sequentially, exactly the pattern
+RAIDZ handles well. Put your PBS datastore on RAIDZ2 and enjoy the
+capacity efficiency.
+
+Media and archive storage falls into the same category. Large files,
+sequential access patterns, prioritizing space efficiency over random
+I/O - RAIDZ is perfectly suited.
+
+A practical implementation might look like this:
+
+[source,bash]
+----
+# High-performance pool for VM disks (mirrors)
+zpool create vm-storage \
+    mirror /dev/sda /dev/sdb \
+    mirror /dev/sdc /dev/sdd
+
+# Capacity-oriented pool for backups (RAIDZ2)
+zpool create backup-storage \
+    raidz2 /dev/sde /dev/sdf /dev/sdg /dev/sdh /dev/sdi /dev/sdj
+----
+
+This separation gives you fast storage where performance matters and
+efficient storage where capacity matters. Your VMs get the IOPS they
+need; your backups get the space they need.
+
+==== Best Practices
+
+Match your storage topology to your workload's actual I/O patterns. VM
+storage should use mirrors for acceptable random I/O performance. Backup
+and archive storage can use RAIDZ for capacity efficiency.
+
+Avoid RAIDZ1 with modern disk sizes. The resilver window is too long and
+the risk of a second failure during rebuild is too high. If you're using
+RAIDZ at all, RAIDZ2 should be your minimum.
+
+Keep VM storage and archive storage separate. Mixing workloads with
+different I/O characteristics on the same pool forces compromises that
+serve neither workload well. Separate pools let you optimize each for
+its purpose.
+
+Consider special vdevs for write-heavy workloads. A small SSD configured
+as a https://en.wikipedia.org/wiki/ZFS#Intent_log[ZFS Intent Log] (SLOG)
+can improve synchronous write performance on RAIDZ pools. This doesn't
+fix the fundamental random I/O limitation, but it helps with specific
+workloads. However, adding complexity to work around a topology mismatch
+is usually a sign you should reconsider the topology.
+
+==== The Bottom Line
+
+RAIDZ is excellent technology used in countless production environments
+worldwide - for the right workloads. Sequential I/O, large files, backup
+storage, media archives - these are where RAIDZ shines. The capacity
+efficiency is real, and the redundancy is solid.
+
+But virtual machine storage isn't that workload. VMs generate random I/O
+that RAIDZ handles poorly, and no amount of adding disks to a RAIDZ vdev
+will fix that fundamental mismatch. If your VMs feel sluggish on RAIDZ
+storage, they're not broken - they're experiencing exactly what the
+architecture delivers.
+
+Match your storage to your workload. Your VMs want IOPS, and mirrors
+deliver IOPS. Give them what they need.
+
+'''''

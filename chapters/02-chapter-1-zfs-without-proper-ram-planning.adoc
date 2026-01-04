@@ -1,0 +1,210 @@
+== ZFS Without Proper RAM Planning
+
+ZFS is one of those technologies that makes you feel like a proper
+sysadmin. Checksums that catch silent corruption, snapshots that cost
+almost nothing, built-in compression, self-healing capabilities - it's
+the filesystem equivalent of a Swiss Army knife with a PhD. Once you've
+experienced the peace of mind that comes from knowing your data is
+actively protected against bit rot, it's hard to go back to traditional
+filesystems.
+
+But here's what the enthusiastic forum posts and YouTube tutorials often
+gloss over: ZFS is hungry. It wants RAM, and not just a polite amount.
+Feed it properly and it will reward you with excellent performance and
+rock-solid reliability. Starve it, and you'll experience mysterious
+slowdowns, VM stuttering, and the creeping suspicion that something is
+wrong without any clear indication of what.
+
+==== The Formula That Fails
+
+If you've researched ZFS at all, you've encountered the rule of thumb:
+"`ZFS needs 1 GB of RAM per terabyte of storage.`" It's simple,
+memorable, and quoted with confidence across countless forum threads and
+blog posts. It's also dangerously misleading for modern Proxmox
+environments.
+
+This formula originated in an era of smaller storage pools and simpler
+workloads. A 4 TB pool on a system with 8 GB of RAM seemed reasonable,
+and often was. But storage has grown dramatically cheaper while our
+expectations for performance have grown higher. Today's homelab might
+casually deploy 20, 40, or even 100 TB of storage - and suddenly that
+simple formula produces numbers that don't account for everything else
+competing for memory.
+
+I learned this lesson firsthand when building what I thought was a
+well-planned storage server. Twenty-four terabytes of raw storage, 16 GB
+of RAM - the math worked out according to the formula. What I didn't
+account for was that Proxmox itself needs memory to operate, VMs need
+memory to run, and ZFS's
+https://en.wikipedia.org/wiki/Adaptive_replacement_cache[Adaptive
+Replacement Cache] was going to fight for every byte it could get.
+
+The result was a system that worked but never felt right. VMs would
+occasionally stutter. Storage performance varied wildly depending on
+what else was happening. The ARC was constantly being squeezed by memory
+pressure, which meant ZFS couldn't cache effectively, which meant more
+disk I/O, which meant worse performance across the board. Everything
+technically functioned, but nothing functioned well.
+
+==== Understanding ZFS Memory Architecture
+
+To plan properly, you need to understand where ZFS memory actually goes.
+The operating system doesn't just hand ZFS a chunk of RAM and walk away
+- there are several distinct components, each with their own
+requirements.
+
+The base overhead for ZFS itself runs around 2 GiB regardless of pool
+size. This covers the kernel modules, metadata structures, and basic
+operational requirements. You pay this cost whether you have 1 TB or 100
+TB of storage.
+
+Beyond that baseline, ZFS needs roughly 1 GiB of RAM for every TiB of
+usable storage. This memory holds metadata about your files and datasets
+- the information ZFS needs to locate and verify your data. Larger pools
+mean more metadata, which means more memory required just to operate.
+
+The ARC is where things get interesting. This is ZFS's read cache, and
+it's remarkably effective at accelerating access to frequently-used
+data. By default, ZFS will try to use as much RAM as it can get for the
+ARC, gracefully releasing memory when other applications need it. In
+theory, this is elegant - ZFS uses spare memory productively without
+starving other processes. In practice, the "`graceful release`" can lag
+behind actual demand, causing memory pressure that affects VM
+performance.
+
+If you're considering https://en.wikipedia.org/wiki/ZFS#L2ARC[L2ARC] - a
+second-level cache on fast storage like SSDs - be aware that it requires
+RAM too. The metadata for L2ARC entries lives in main memory, consuming
+roughly 1 GiB of RAM for every 50 GiB of L2ARC space. A 500 GB L2ARC
+device costs you 10 GiB of RAM just to track what's in it.
+
+And then there's deduplication, which is where memory requirements can
+explode entirely. Deduplication requires ZFS to maintain a table of
+every unique block in your pool so it can identify duplicates. This
+https://en.wikipedia.org/wiki/Data_deduplication[Deduplication Table]
+needs approximately 5 GiB of RAM per TiB of stored data. A modest 10 TB
+pool with deduplication enabled demands 50 GB of RAM just for the DDT -
+before accounting for anything else.
+
+==== Practical Planning
+
+So what does this mean for your actual hardware decisions? Let's work
+through realistic scenarios.
+
+For a small homelab pool - say 8 TiB usable - you're looking at 2 GiB
+base overhead plus 8 GiB for metadata. That's 10 GiB just for ZFS to
+operate comfortably, before your VMs get a single byte. On a system with
+16 GB total, you have perhaps 6 GB remaining for Proxmox overhead and
+all your virtualized workloads. It'll work, but you'll be constantly
+bumping against limits.
+
+Scale that up to a 24 TiB pool and the math gets uncomfortable quickly.
+Base overhead plus metadata puts you at 26 GiB for ZFS alone. Now you
+need 32 GB of RAM minimum, and 64 GB is far more comfortable if you want
+your VMs to have breathing room.
+
+The practical floor for serious ZFS usage is 16 GB of system RAM, and
+that only works for smaller pools with modest VM workloads. For pools in
+the 10-20 TiB range, 32 GB should be your starting point. Larger pools
+or heavier workloads push you toward 64 GB or beyond.
+
+As for deduplication - just don't. Unless you have a very specific use
+case where you know you'll see massive duplication ratios and you have
+the memory budget to support it, deduplication causes more problems than
+it solves. The memory overhead is punishing, write performance suffers
+significantly, and for most workloads the space savings don't justify
+the costs. Use compression instead - LZ4 or ZSTD provide meaningful
+space savings with negligible performance impact and no additional
+memory requirements.
+
+==== Monitoring What Matters
+
+The good news is that ZFS is transparent about its memory usage. You
+don't have to guess whether your system is healthy - you can see exactly
+what's happening with the ARC and respond accordingly.
+
+The `arc++_++summary` command provides a comprehensive overview of ARC
+statistics, including current size, hit rates, and configuration limits.
+Run it periodically to understand how your cache is behaving:
+
+[source,bash]
+----
+arc_summary
+----
+
+For a quick check of key metrics without the full report, you can query
+the kernel statistics directly:
+
+[source,bash]
+----
+cat /proc/spl/kstat/zfs/arcstats | grep -E "^size|^c_max|^c_min|^hits|^misses"
+----
+
+The numbers you want to watch are `size` (current ARC size in bytes),
+`c++_++max` (the maximum the ARC is allowed to grow), and `c++_++min`
+(the minimum the ARC will fight to maintain). If your ARC is
+consistently sitting at or near `c++_++min` while the system shows
+memory pressure, you don't have enough RAM for your workload.
+
+The hit rate matters too. A healthy ARC should be serving the vast
+majority of read requests from cache. If your hit rate is low - say
+below 80% for a typical workload - either your working set doesn't fit
+in the available cache or your access patterns are unusually random.
+Either way, it's worth investigating.
+
+For ongoing visibility, integrate ZFS metrics into whatever monitoring
+system you're using. Checkmk, Prometheus with appropriate exporters, or
+even a simple script that logs key values - any of these will help you
+spot trends before they become problems. A gradually declining hit rate
+or steadily increasing memory pressure gives you warning that something
+needs attention.
+
+==== Constraining the ARC
+
+In memory-constrained environments, you might need to explicitly limit
+how much RAM ZFS can claim. Left to its own devices, ZFS will use as
+much as it can get, which sounds efficient but can cause problems when
+that memory isn't released quickly enough for other workloads.
+
+Setting a maximum ARC size gives you predictable behavior at the cost of
+some potential cache performance. The configuration lives in
+`/etc/modprobe.d/zfs.conf`:
+
+[source,bash]
+----
+# Limit ARC to 8 GiB (value in bytes)
+options zfs zfs_arc_max=8589934592
+----
+
+After making changes, update the initial ramdisk and reboot for the
+setting to take effect:
+
+[source,bash]
+----
+update-initramfs -u
+reboot
+----
+
+Choose your limit based on your total RAM minus what you need for
+Proxmox, VMs, and a reasonable buffer. The ARC operates well even when
+constrained - you'll see more disk reads than with an unlimited cache,
+but the system behavior becomes much more predictable.
+
+==== The Bottom Line
+
+ZFS is absolutely worth using. The data integrity features alone make it
+a compelling choice for any storage where the data matters. But it's not
+a technology you can deploy casually based on oversimplified formulas
+and hope for the best.
+
+Understand what ZFS actually requires. Plan your memory budget honestly,
+accounting for the base system, your virtualization workload, and ZFS
+with appropriate headroom. Monitor the ARC and respond when the numbers
+suggest problems. And resist the temptation of deduplication unless you
+truly understand the costs.
+
+Your future self, enjoying a Proxmox environment that performs
+consistently without mysterious slowdowns, will appreciate the planning
+you put in today.
+
+'''''

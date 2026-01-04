@@ -1,0 +1,105 @@
+:sectnums!:
+
+== Conclusion
+
+If you've made it through all ten chapters, you now have a solid
+understanding of where Proxmox deployments commonly go wrong - and more
+importantly, how to avoid those pitfalls in your own environment.
+
+Let's step back and look at the bigger picture.
+
+==== The Common Thread
+
+Reading through these mistakes, you might notice a pattern. Very few of
+them are about Proxmox being broken or badly designed. Instead, they're
+about mismatched expectations, outdated assumptions, and the gap between
+"`technically possible`" and "`actually advisable.`"
+
+ZFS works with limited RAM - it just doesn't work well. RAIDZ provides
+redundancy - just not the kind of performance VMs need. Docker runs on
+the Proxmox host - until it conflicts with something important. HA can
+be enabled on two nodes - it just won't actually provide high
+availability.
+
+The recurring theme is that Proxmox gives you tremendous flexibility,
+and with that flexibility comes the responsibility to understand the
+implications of your choices. The tool won't stop you from doing things
+that seem reasonable but lead to problems. That's not a flaw; it's the
+nature of powerful, flexible software.
+
+==== Principles Over Checklists
+
+Rather than memorizing specific rules, internalize the principles behind
+them:
+
+*Understand your resource requirements.* Whether it's RAM for ZFS, nodes
+for quorum, or IOPS for VM storage, know what your chosen technology
+actually needs - not what forum posts vaguely suggest.
+
+*Separate concerns cleanly.* Hypervisor versus applications. VM storage
+versus backup storage. Infrastructure layer versus application layer.
+Clear boundaries make systems easier to understand, maintain, and
+troubleshoot.
+
+*Plan for failure.* Backups that aren't tested aren't backups. HA that
+can't achieve quorum isn't highly available. Monitoring that doesn't
+alert you isn't monitoring. Think through what happens when things go
+wrong, not just when they go right.
+
+*Keep it simple until you need complexity.* Local-LVM might be enough. A
+single node might be enough. Basic vzdump backups might be enough. Add
+complexity when you have concrete requirements that demand it, not
+because it seems more professional.
+
+*Maintain visibility.* You can't manage what you can't see. Monitoring,
+logging, regular health checks - these aren't optional extras for
+serious environments. They're how you know whether your infrastructure
+is healthy before users start complaining.
+
+==== Your Environment Is Unique
+
+This guide provides general recommendations, but your specific situation
+might call for different choices. A homelab running non-critical
+workloads has different requirements than a production cluster serving
+paying customers. A single-node setup doesn't need to worry about
+migration compatibility. An environment with excellent backups can
+tolerate more risk in other areas.
+
+Use the principles from this guide to evaluate your own requirements and
+constraints. The goal isn't to implement every recommendation blindly -
+it's to make informed decisions that match your actual needs.
+
+==== Continuous Improvement
+
+A well-running Proxmox environment isn't a destination; it's an ongoing
+practice. Technology evolves. Your workloads change. New features become
+available while old assumptions become outdated.
+
+Schedule periodic reviews of your infrastructure. Are your backups still
+covering everything important? Has your storage grown beyond what your
+original RAM allocation supports? Are there new Proxmox features that
+would improve your setup? Is your monitoring still catching what
+matters?
+
+The administrators who avoid disasters aren't the ones who set things up
+perfectly once - they're the ones who pay attention continuously and
+address small issues before they become big ones.
+
+==== Final Thoughts
+
+Proxmox VE is genuinely excellent software that powers countless
+reliable environments around the world. When things go wrong, the cause
+is usually human decisions rather than software defects. That's actually
+good news: it means you have control over your outcomes.
+
+Build your environment thoughtfully. Monitor it diligently. Back it up
+religiously. Keep learning as the technology evolves.
+
+And the next time you're tempted to take a shortcut - to skip the backup
+test, to install just one more service on the host, to enable HA on a
+two-node cluster because surely it'll be fine - remember that future you
+is the one who'll deal with the consequences.
+
+Be kind to future you.
+
+Good luck with your Proxmox deployments.

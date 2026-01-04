@@ -1,0 +1,449 @@
+== No Monitoring for Nodes, Storage, and Backups
+
+There's a particular kind of silence in IT infrastructure that feels
+peaceful but shouldn't. It's the silence of a system running without
+monitoring - where everything appears fine because nothing is telling
+you otherwise. No alerts, no warnings, no dashboards turning red. Just
+quiet confidence that your Proxmox environment is humming along
+perfectly.
+
+Then a disk fails. Or rather, a disk failed three weeks ago, and the
+degraded array you didn't know about just lost a second disk. Or your
+backup storage filled up two months ago, and every backup since has
+silently failed. Or your ZFS pool has been accumulating checksum errors
+that would have told you a disk was dying if anyone had been watching.
+
+Monitoring isn't about generating pretty graphs for a dashboard you
+glance at occasionally. It's about knowing the health of your
+infrastructure before problems become emergencies, and having the
+information you need to make decisions when something does go wrong.
+
+==== The False Comfort of "`No News`"
+
+Proxmox provides a web interface that shows the current state of your
+nodes, VMs, and storage. It's useful for day-to-day management, but it's
+not monitoring. It shows you what's happening right now, when you choose
+to look. It doesn't alert you when something changes, track trends over
+time, or wake you up at 3 AM when a critical threshold is crossed.
+
+The distinction matters because infrastructure problems rarely announce
+themselves with immediate, obvious failures. A disk develops bad sectors
+gradually. Memory errors accumulate over time. Storage fills up megabyte
+by megabyte. CPU temperatures creep higher as fans accumulate dust. By
+the time these issues cause visible symptoms - VMs crashing, services
+failing, data corruption - the underlying problem has often progressed
+far beyond easy remediation.
+
+Effective monitoring catches these trends early. It notices when disk
+latency increases before users complain about slowness. It alerts you to
+SMART warnings before the disk actually fails. It tracks storage
+consumption and tells you when you'll run out of space at the current
+growth rate, not when you've already run out.
+
+==== What You Should Be Watching
+
+A comprehensive monitoring setup for Proxmox environments covers several
+distinct areas, each with its own metrics and alert thresholds.
+
+*Node Health*
+
+Your Proxmox hosts are the foundation everything else depends on. At
+minimum, monitor CPU utilization, memory usage, system load, and network
+throughput. But don't stop at simple utilization metrics - context
+matters.
+
+High CPU utilization during a scheduled backup window is expected. The
+same utilization at 3 PM on a Tuesday might indicate a runaway process
+or a VM under attack. Memory pressure that causes swapping degrades
+performance across all VMs, not just the one consuming memory. Network
+errors and dropped packets can indicate cable problems, switch issues,
+or driver bugs.
+
+Temperature monitoring is often overlooked but particularly important
+for homelab environments where cooling might be less robust than a
+proper data center. A node running hot isn't just inefficient; it's
+aging its components faster and heading toward thermal throttling or
+shutdown.
+
+[source,bash]
+----
+# Quick node health check
+echo "=== CPU ===" && top -bn1 | head -5
+echo "=== Memory ===" && free -h
+echo "=== Load ===" && uptime
+echo "=== Temperatures ===" && sensors 2>/dev/null || echo "Install lm-sensors"
+----
+
+*Storage Health*
+
+For any storage system, but especially for ZFS, monitoring is
+non-negotiable. ZFS provides extensive self-reporting capabilities that
+tell you exactly what's happening with your data - but only if you're
+listening.
+
+Pool status should be checked regularly for degraded vdevs, ongoing
+scrubs or resilvers, and any errors:
+
+[source,bash]
+----
+# Comprehensive ZFS pool status
+zpool status -v
+
+# Check for any errors (should return nothing if healthy)
+zpool status -x
+----
+
+A healthy pool reports "`all pools are healthy.`" Anything else demands
+immediate attention.
+
+Scrub results are your primary insight into data integrity. ZFS scrubs
+read all data in a pool and verify checksums, detecting silent
+corruption that wouldn't otherwise be visible. Check when scrubs last
+ran and what they found:
+
+[source,bash]
+----
+# Last scrub details are in zpool status output
+zpool status tank | grep -A5 "scan:"
+----
+
+A scrub that reports checksum errors is telling you something is wrong -
+possibly a dying disk, bad memory, or a controller issue. Don't ignore
+these warnings. Investigate the source before a recoverable situation
+becomes data loss.
+
+For traditional storage,
+https://en.wikipedia.org/wiki/Self-Monitoring,_Analysis_and_Reporting_Technology[SMART
+monitoring] provides early warning of disk failures:
+
+[source,bash]
+----
+# Check SMART status for all disks
+for disk in /dev/sd?; do
+    echo "=== $disk ==="
+    smartctl -H $disk
+done
+
+# Detailed SMART attributes for a specific disk
+smartctl -A /dev/sda
+----
+
+Key SMART attributes to watch include Reallocated Sector Count, Current
+Pending Sector Count, and Uncorrectable Sector Count. Any non-zero
+values in these fields indicate a disk that's starting to fail. It might
+keep working for months, or it might die tomorrow - but it will die, and
+you should plan accordingly.
+
+*Backup Health*
+
+A backup job that completes isn't necessarily a backup job that
+succeeded. Backup monitoring should verify not just that jobs ran, but
+that they produced valid, restorable backups of the systems you intended
+to protect.
+
+Track backup job success and failure rates. A single failed backup might
+be a transient issue; repeated failures indicate a problem that needs
+investigation. More insidiously, watch for backups that succeed but
+shrink unexpectedly - this can indicate that something in the source VM
+changed and the backup is no longer capturing what you think it is.
+
+For Proxmox Backup Server, the verification feature should be part of
+your monitoring strategy:
+
+[source,bash]
+----
+# On PBS, check recent backup and verification status
+proxmox-backup-manager task list --limit 20
+----
+
+Storage consumption trends matter for backup destinations. Running out
+of space doesn't just stop new backups; depending on your retention
+policies, it might prevent pruning of old backups too, creating a
+deadlock that requires manual intervention.
+
+==== Checkmk: A Monitoring Solution That Fits
+
+While many monitoring solutions exist, https://checkmk.com/[Checkmk]
+deserves special attention for Proxmox environments. It strikes an
+excellent balance between comprehensive out-of-the-box functionality and
+the flexibility to customize when needed. The Raw Edition is fully open
+source and remarkably capable - you don't need to pay for a license to
+get professional-grade monitoring.
+
+What makes Checkmk particularly well-suited for Proxmox is its native
+understanding of virtualization environments. Rather than treating your
+hypervisor as just another Linux server, Checkmk includes specific
+checks for Proxmox VE that understand the relationship between hosts,
+VMs, containers, and storage.
+
+*Setting Up Checkmk for Proxmox*
+
+Getting started requires a Checkmk server - this can run in a VM on your
+Proxmox cluster or on separate hardware. For homelabs, running it as a
+VM is perfectly fine; for production environments, consider placing it
+on independent infrastructure so it remains available even if your main
+cluster has issues.
+
+[source,bash]
+----
+# Download and install Checkmk Raw Edition on a Debian/Ubuntu system
+# Check checkmk.com for the latest version
+wget https://download.checkmk.com/checkmk/2.3.0p1/check-mk-raw-2.3.0p1_0.jammy_amd64.deb
+apt install ./check-mk-raw-2.3.0p1_0.jammy_amd64.deb
+
+# Create a monitoring site
+omd create mysite
+omd start mysite
+----
+
+Once your Checkmk server is running, you'll install agents on your
+Proxmox hosts. The agent is a simple shell script that collects system
+information and outputs it in a format Checkmk understands:
+
+[source,bash]
+----
+# On each Proxmox host, install the Checkmk agent
+apt install check-mk-agent
+
+# Verify the agent works
+check_mk_agent | head -100
+----
+
+The agent output includes everything from CPU and memory statistics to
+disk health, network interfaces, and running processes. Checkmk's server
+periodically queries this agent and processes the results.
+
+*Proxmox-Specific Monitoring with Checkmk*
+
+Beyond the standard Linux monitoring, Checkmk offers a dedicated Proxmox
+VE special agent that queries the Proxmox API directly. This provides
+visibility into Proxmox-specific objects that the standard Linux agent
+can't see:
+
+* VM and container status, resource allocation, and actual usage
+* Cluster health and quorum status
+* Storage pool status across all configured storage backends
+* Backup job status and history
+* Replication status for ZFS replication jobs
+* Node membership and cluster communication health
+
+To enable Proxmox monitoring, you'll configure the special agent in
+Checkmk's web interface. You'll need API credentials from Proxmox:
+
+[source,bash]
+----
+# On Proxmox, create an API user for monitoring (read-only)
+pveum user add monitoring@pve
+pveum aclmod / -user monitoring@pve -role PVEAuditor
+pveum user token add monitoring@pve checkmk-token -privsep 0
+# Note: In Checkmk, use "monitoring@pve" as username and the token secret
+----
+
+Store the token ID and secret - you'll enter these in Checkmk when
+configuring the Proxmox special agent rule.
+
+The Proxmox integration automatically discovers your VMs and containers,
+creating monitoring objects for each. You can track which host each VM
+runs on, receive alerts when VMs are stopped unexpectedly, and monitor
+resource usage at both the VM and host level.
+
+*ZFS Monitoring in Checkmk*
+
+Checkmk includes robust ZFS monitoring that goes far beyond basic pool
+status. The ZFS checks monitor:
+
+* Pool health status with alerts for degraded or faulted vdevs
+* Scrub status including time since last scrub and any errors found
+* Capacity utilization with configurable warning and critical thresholds
+* ARC statistics including hit rates and size
+* Individual vdev and disk status
+
+The ZFS checks are automatically discovered when you add a host running
+ZFS. No additional configuration required - Checkmk detects the ZFS
+pools and creates appropriate service checks.
+
+[source,bash]
+----
+# The Checkmk agent includes ZFS sections automatically
+check_mk_agent | grep -A20 "<<<zpool_status>>>"
+----
+
+For environments where ZFS is critical - which is most Proxmox
+environments - these checks provide early warning of developing
+problems. A scrub that finds checksum errors, a vdev showing elevated
+read errors, or ARC hit rates dropping significantly all generate alerts
+before they escalate into data loss.
+
+*SMART Disk Monitoring*
+
+Checkmk monitors SMART attributes for all physical disks, tracking the
+metrics that predict disk failure. Configure the SMART check to alert
+on:
+
+* Reallocated sector counts above zero
+* Current pending sectors indicating bad blocks waiting for reallocation
+* Spin retry counts suggesting mechanical issues
+* Temperature readings outside safe ranges
+* Raw read error rates trending upward
+
+When a disk starts showing SMART warnings, you'll know about it with
+time to order a replacement and migrate data gracefully - rather than
+discovering the failure when the disk stops responding entirely.
+
+*Building Useful Dashboards*
+
+Checkmk's interface lets you create custom dashboards that show the
+information you care about at a glance. For a Proxmox environment, a
+useful dashboard might include:
+
+* Overall cluster health status (all nodes, quorum status)
+* Storage utilization across all pools with trend graphs
+* Top VMs by CPU and memory usage
+* Recent alerts and problems
+* Backup job status for the last 24 hours
+
+The dashboard becomes your morning check-in point - a quick glance
+confirms everything is healthy, or immediately highlights what needs
+attention.
+
+*Notification Configuration*
+
+Checkmk supports flexible notification rules that control who gets
+alerted about what, and through which channels. Configure notifications
+based on:
+
+* Severity (warning vs. critical)
+* Time of day (different rules for business hours vs. nights/weekends)
+* Host or service groups (storage alerts to one team, network alerts to
+another)
+* Escalation (if the first contact doesn't acknowledge within an hour,
+notify the next person)
+
+For homelab use, email notifications are often sufficient. Checkmk also
+supports SMS, Slack, Microsoft Teams, PagerDuty, and many other
+notification methods. The key is ensuring that critical alerts actually
+reach you - test your notification configuration regularly.
+
+[source,bash]
+----
+# Checkmk notification test from command line
+# Useful for verifying email delivery works
+cmk --notify test
+----
+
+==== Other Monitoring Options
+
+While Checkmk is excellent, it's not the only choice. Your existing
+infrastructure and preferences might point toward different solutions.
+
+*Prometheus with Grafana* has become the de facto standard for
+cloud-native, metrics-focused monitoring. It's highly flexible, scales
+well, and has an enormous ecosystem of exporters. The learning curve is
+steeper than Checkmk, but the customization possibilities are extensive.
+For Proxmox, you'll want the
+https://github.com/prometheus-pve/prometheus-pve-exporter[PVE exporter]
+alongside the standard node exporter.
+
+*Zabbix* occupies a middle ground - more configurable than Checkmk, more
+turnkey than Prometheus. It handles both metrics and log-based
+monitoring, supports complex trigger conditions, and has extensive
+template libraries including Proxmox templates.
+
+For smaller environments or homelabs, even simpler solutions can work. A
+well-crafted shell script running via cron, checking critical metrics
+and sending alerts, provides better visibility than no monitoring at
+all. But as your environment grows, you'll appreciate having a proper
+monitoring system with history, dashboards, and sophisticated alerting.
+
+==== Alerting: The Point of Monitoring
+
+Collecting metrics is only valuable if something acts on them. Alerting
+transforms monitoring from passive data collection into active
+infrastructure management.
+
+Effective alerts share several characteristics. They're actionable -
+when an alert fires, there's something specific you can and should do in
+response. They have appropriate thresholds - sensitive enough to catch
+real problems, but not so sensitive that you're drowning in false
+positives. And they reach you through channels you'll actually notice.
+
+Define clear severity levels and response expectations. A warning about
+80% disk utilization can wait until morning. An alert about a degraded
+ZFS pool needs attention within hours. A critical alert about active
+data corruption needs immediate response regardless of the hour.
+
+Whatever monitoring system you choose, invest time in tuning your
+alerts. Start with conservative thresholds and adjust based on
+experience. Track false positives and refine the conditions that trigger
+them. The goal is a monitoring system where every alert means something
+- so that when an alert fires, you take it seriously rather than
+assuming it's another false alarm.
+
+==== Building a Monitoring Culture
+
+Technical implementation is only part of effective monitoring. You also
+need habits and processes that ensure monitoring remains useful over
+time.
+
+Review your dashboards regularly, even when nothing is alerting. Look
+for trends that haven't yet crossed alert thresholds. Notice when
+metrics look different than usual, even if "`different`" isn't "`bad.`"
+This kind of proactive attention catches issues that automated alerts
+miss.
+
+Keep your monitoring configuration updated as your infrastructure
+changes. New VMs should be added to monitoring automatically or as part
+of your provisioning checklist. Decommissioned systems should be removed
+so they don't generate confusing alerts or clutter your dashboards.
+
+Document your monitoring setup - what's being monitored, what the alert
+thresholds mean, and what response each alert expects. When you're
+troubleshooting an incident at 2 AM, clear documentation saves precious
+time and reduces errors.
+
+Test your alerting periodically. Intentionally trigger an alert
+condition and verify that notifications arrive through all configured
+channels. Discover notification failures during a test, not during an
+actual emergency.
+
+==== Best Practices
+
+Deploy monitoring before you think you need it. Setting up monitoring
+while everything is working gives you a baseline of normal behavior.
+Setting it up during an incident means you're learning the tools while
+also fighting a fire.
+
+Monitor the monitoring. If your monitoring system itself fails, you want
+to know. Configure health checks for your monitoring infrastructure, and
+consider where those alerts go if the primary alerting system is down.
+
+Retain historical data long enough to be useful. Being able to compare
+current performance to last month, last quarter, or last year provides
+context that's invaluable for capacity planning and troubleshooting.
+Storage is cheap; insight is valuable.
+
+Start simple and expand. A basic monitoring setup that you actually
+maintain is better than an elaborate system you set up once and then
+ignore because it's too complex. Begin with critical metrics, add
+coverage over time, and continuously refine based on what proves useful.
+
+Treat monitoring gaps as risks. If a system isn't monitored, assume you
+don't know its health. Unmonitored systems have a way of failing
+silently until the failure cascades into something visible - by which
+point the original problem may be much harder to diagnose.
+
+==== The Bottom Line
+
+Monitoring is the difference between proactive infrastructure management
+and reactive firefighting. Without it, you're operating blind,
+discovering problems only when they've already impacted your services or
+your data. With proper monitoring in place, you see issues developing,
+address them on your schedule, and maintain the kind of visibility that
+transforms system administration from stressful guesswork into informed
+decision-making.
+
+The time to implement monitoring is now, while everything is running
+smoothly. Your future self, calmly addressing a warning alert before it
+becomes a critical failure, will be grateful you made the investment.
+
+'''''

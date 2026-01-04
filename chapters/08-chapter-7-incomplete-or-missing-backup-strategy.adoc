@@ -1,0 +1,245 @@
+== Incomplete or Missing Backup Strategy
+
+Backups are like insurance - everyone agrees they're important, but
+somehow there's always something more urgent to deal with. The new VM
+that needs deploying, the performance issue that needs investigating,
+the update that can't wait. Backup configuration gets pushed to "`next
+week`" until one day a disk fails, a ransomware attack hits, or someone
+accidentally deletes the wrong VM.
+
+At that point, "`next week`" becomes "`too late.`"
+
+==== The Uncomfortable Truth
+
+Here's a statistic that should keep you up at night: most backup
+failures aren't discovered until a restore is needed. Systems dutifully
+report successful backup jobs for months or years, but when disaster
+strikes, the backups turn out to be corrupted, incomplete, or simply not
+what anyone expected.
+
+This happens because backup configuration is often treated as a one-time
+setup task rather than an ongoing operational responsibility. You
+configure vzdump, see it run successfully a few times, and move on.
+Meanwhile, new VMs get created without backup jobs, storage fills up and
+starts silently failing, and retention policies delete the one backup
+you actually needed.
+
+A backup you haven't tested is not a backup. It's a hope.
+
+==== vzdump: Where Most People Start
+
+Proxmox includes vzdump as its built-in backup tool, and for simple
+setups it works reasonably well. You can schedule backups to local
+storage, NFS shares, or SMB mounts, and the process is straightforward
+to configure through the web interface.
+
+[source,bash]
+----
+# Manual backup of a single VM
+vzdump 100 --storage backup-storage --mode snapshot
+
+# Check backup job configuration
+cat /etc/pve/jobs.cfg
+----
+
+For a homelab with a handful of VMs backing up to a NAS, vzdump on a
+schedule is perfectly adequate. But as your environment grows, its
+limitations become apparent.
+
+Each backup is a complete copy of the VM. If you have a 500 GB VM and
+back it up daily, you're writing 500 GB every single day, even if only a
+few megabytes actually changed. Storage fills up quickly, backup windows
+grow longer, and network bandwidth becomes a bottleneck if you're
+backing up to remote storage.
+
+==== Proxmox Backup Server: The Modern Approach
+
+https://www.proxmox.com/en/proxmox-backup-server[Proxmox Backup Server]
+(PBS) is Proxmox's purpose-built solution for these problems, and it's
+become the recommended approach for any serious Proxmox deployment. If
+you're still relying solely on vzdump to local or network storage, PBS
+deserves your attention.
+
+The fundamental difference is that PBS uses chunk-based
+https://en.wikipedia.org/wiki/Data_deduplication[deduplication]. Instead
+of storing complete VM images, PBS breaks data into chunks, calculates
+checksums, and stores each unique chunk only once. When you back up a
+500 GB VM where only 100 MB changed since yesterday, PBS transfers and
+stores only those 100 MB of new chunks. Everything else is deduplicated
+against existing data.
+
+The storage savings are dramatic. Environments with many similar VMs -
+think identical base images with different configurations - can see
+deduplication ratios of 10:1 or higher. Even diverse environments
+typically achieve 2:1 to 5:1, meaning your backup storage goes much
+further.
+
+But deduplication isn't even the biggest advantage. PBS also provides:
+
+*Incremental backups* that transfer only changed blocks, reducing backup
+windows from hours to minutes and dramatically cutting network bandwidth
+requirements.
+
+*Built-in encryption* that protects your backups at rest and in transit.
+You control the keys, so even if someone gains access to the backup
+storage, the data remains protected.
+
+*Integrity verification* that goes beyond "`did the backup job
+complete.`" PBS can verify that stored chunks are readable and match
+their recorded checksums, catching storage corruption before you need to
+restore.
+
+*Granular restore options* including file-level restore that lets you
+pull individual files from a backup without restoring the entire VM.
+When someone deletes an important document, you don't need to spin up
+the whole backup image to retrieve it.
+
+==== Setting Up PBS Integration
+
+Adding a PBS server to your Proxmox environment is straightforward. On
+the Proxmox VE side, you add PBS as a storage target:
+
+[source,bash]
+----
+# Add PBS storage
+# Use --password without value for interactive prompt (recommended)
+pvesm add pbs pbs-storage --server <pbs-ip> \
+    --datastore <datastore-name> \
+    --username backup@pbs \
+    --password \
+    --fingerprint <server-fingerprint>
+----
+
+Once configured, PBS appears as a backup destination in your backup job
+configuration. You can then schedule backups just like with vzdump, but
+the underlying mechanism is dramatically more efficient.
+
+On the PBS side, you'll want to configure retention policies that match
+your recovery requirements:
+
+[%unbreakable]
+[source,bash]
+----
+# Example retention in PBS datastore.cfg:
+# prune-schedule daily
+# keep-last 3
+# keep-daily 7
+# keep-weekly 4
+# keep-monthly 6
+----
+
+==== The 3-2-1 Rule
+
+No discussion of backup strategy is complete without mentioning the
+https://en.wikipedia.org/wiki/Backup#Storage[3-2-1 rule]: maintain three
+copies of your data, on two different types of media, with one copy
+offsite.
+
+In a Proxmox context, this might look like:
+
+[arabic]
+. *Production data* on your local storage (copy one)
+. *PBS backups* on a dedicated backup server (copy two, different media
+if PBS uses different disks)
+. *Offsite replication* to a remote PBS instance, cloud storage, or
+physical media stored elsewhere (copy three, offsite)
+
+PBS supports remote sync to another PBS server, making the offsite
+component straightforward to implement:
+
+[source,bash]
+----
+# On the remote PBS, create a sync job pulling from the primary
+# Configured via PBS web interface under Datastore > Sync Jobs
+----
+
+For homelab environments where a second physical location isn't
+practical, even syncing critical backups to cloud storage provides
+protection against local disasters like fire or theft.
+
+==== Testing Your Restores
+
+This point cannot be emphasized enough: *regularly test your restores*.
+Not just "`click restore and see if it starts,`" but actually verify
+that the restored system works correctly.
+
+Schedule periodic restore tests as part of your operational routine:
+
+[source,bash]
+----
+# Restore a VM to verify backup integrity (to a different VMID)
+qmrestore <backup-file-or-pbs-reference> <new-vmid> --storage <target-storage>
+----
+
+Boot the restored VM on an isolated network, verify that applications
+work, check that recent data is present. Then delete the test restore
+and document that you verified backups on this date. When disaster
+strikes, you'll have confidence that your recovery process actually
+works.
+
+PBS includes built-in verification jobs that check backup integrity
+without performing full restores:
+
+[source,bash]
+----
+# Verification runs can be scheduled in PBS
+# They read and verify all chunks in a backup
+----
+
+This catches storage-level corruption but doesn't verify that the backup
+is actually bootable and functional. Both types of testing have their
+place.
+
+==== Common Backup Mistakes
+
+Beyond not having backups at all, several common mistakes undermine
+backup strategies:
+
+*Not backing up new VMs*: You create a VM, get it working, and forget to
+add it to backup jobs. Weeks later, that VM fails, and you discover it
+was never backed up. Audit your backup coverage regularly.
+
+*Insufficient retention*: Keeping only the last few backups seems
+space-efficient until you need to recover from something that happened
+two weeks ago and your oldest backup is from yesterday. Ransomware in
+particular often lurks for days or weeks before activating.
+
+*No offsite copies*: Your backup server sitting next to your production
+server provides no protection against theft, fire, flood, or electrical
+events that take out your entire setup.
+
+*Backing up to the same storage*: If your VM disks and backups live on
+the same physical storage, a storage failure destroys both. Backups
+should always target separate physical media.
+
+==== Best Practices
+
+Implement PBS if you're running more than a handful of VMs. The
+efficiency gains and additional features are worth the setup effort, and
+it's free to use.
+
+Follow the 3-2-1 rule as closely as your budget and infrastructure
+allow. Two copies on the same server isn't a backup strategy; it's a
+false sense of security.
+
+Test restores regularly and document the results. Quarterly full restore
+tests for critical systems isn't overkill - it's due diligence.
+
+Monitor your backup jobs actively. Configure notifications for failures,
+and review backup logs periodically even when things appear to be
+working. Silent failures are the most dangerous kind.
+
+Audit backup coverage whenever your environment changes. New VMs, new
+containers, new critical data - all should trigger a review of what's
+being backed up and whether coverage is adequate.
+
+==== The Bottom Line
+
+Backups are the last line of defense against data loss, and they only
+work if they're comprehensive, tested, and properly maintained. A backup
+strategy isn't something you configure once and forget; it's an ongoing
+operational responsibility that requires attention, testing, and regular
+verification. Invest the time now, while everything is working, so
+you're not scrambling to recover from disaster without a safety net.
+
+'''''

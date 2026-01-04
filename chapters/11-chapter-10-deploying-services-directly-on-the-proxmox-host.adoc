@@ -1,0 +1,276 @@
+== Deploying Services Directly on the Proxmox Host
+
+It starts with a simple thought: "`I just need a small web server for
+internal documentation.`" Or maybe it's a database for a quick project,
+a file synchronization service, or a VPN endpoint. The Proxmox host is
+right there, already running, with plenty of spare resources. Creating a
+whole VM for something so simple feels like overkill. So you run
+`apt install` directly on the hypervisor, configure the service, and
+move on with your day.
+
+Weeks or months later, that "`one small service`" has been joined by a
+few friends. There's a reverse proxy handling SSL termination, a
+monitoring agent you installed manually, maybe a cron job that syncs
+files somewhere. The Proxmox host has gradually transformed from a
+focused hypervisor into a general-purpose server that also happens to
+run virtual machines.
+
+This path leads somewhere you don't want to go.
+
+==== The Creeping Complexity Problem
+
+The fundamental issue isn't any single service - it's the accumulation.
+Each additional package installed on the Proxmox host adds dependencies,
+configuration files, running processes, and potential interactions with
+the base system. Individually, these might be harmless. Collectively,
+they create a system that's increasingly difficult to understand,
+maintain, and troubleshoot.
+
+Proxmox VE is built on Debian, which means it participates in Debian's
+package management ecosystem. When you install additional software,
+you're adding packages that have their own dependencies, which might
+overlap with or conflict with packages that Proxmox itself depends on.
+Today everything works fine. But the next time you run `apt upgrade`, a
+dependency resolution might not go the way you expected.
+
+I've seen Proxmox upgrades fail because a manually installed service
+required a library version that conflicted with updated Proxmox
+packages. The resulting state - half-upgraded, with broken dependencies
+- is exactly where you don't want your hypervisor to be, especially if
+you have production VMs depending on it.
+
+==== The Upgrade Risk
+
+Speaking of upgrades, major Proxmox version upgrades deserve special
+consideration. Moving from one major version to the next involves
+significant package changes, and Proxmox provides upgrade guides that
+assume a relatively standard installation. The more you've customized
+your host, the more likely you are to encounter unexpected issues.
+
+Proxmox's upgrade documentation even explicitly warns about this. They
+can't test every possible combination of additional software, and they
+can't guarantee that your custom services will survive the upgrade
+intact. A clean Proxmox host with minimal modifications follows the
+documented upgrade path smoothly. A host that's accumulated years of
+additional software becomes an upgrade adventure with uncertain
+outcomes.
+
+This isn't theoretical. Every major Proxmox version upgrade brings forum
+posts from users whose custom configurations broke during the process.
+Sometimes it's a service that won't start. Sometimes it's a
+configuration file that got overwritten. Sometimes it's a subtle
+incompatibility that doesn't manifest until weeks later. The common
+factor is almost always software that shouldn't have been on the
+hypervisor in the first place.
+
+==== Security Surface Area
+
+Every service running on a system represents potential attack surface. A
+web server might have vulnerabilities. A database might be
+misconfigured. Even well-maintained software occasionally has security
+issues discovered and exploited before patches are available.
+
+On a typical server, a compromised service is bad but contained. The
+attacker gains access to that server and its data. On your Proxmox
+hypervisor, a compromised service potentially gives the attacker access
+to every VM and container running on that host. They can access virtual
+disk images, intercept network traffic, or simply shut down your entire
+infrastructure.
+
+The principle of least privilege suggests that your most critical
+infrastructure components should have the smallest possible attack
+surface. For a hypervisor, that means running the minimum necessary to
+perform virtualization - and nothing else. Every additional service is
+another potential entry point that, if compromised, affects not just
+itself but everything the hypervisor manages.
+
+==== Troubleshooting Becomes Archaeology
+
+When something goes wrong on a minimal system, the debugging process is
+relatively straightforward. You know what's supposed to be running, you
+know what the normal state looks like, and deviations are easy to spot.
+
+On a system that's accumulated services over time, troubleshooting
+becomes an archaeological expedition. Is this process supposed to be
+running? Who installed that package and why? What's this configuration
+file doing, and does anyone still need it? The system's behavior becomes
+hard to reason about because no one fully understands everything that's
+on it anymore.
+
+This complexity compounds during incidents. When your VMs are
+inaccessible and you're trying to figure out why, the last thing you
+need is uncertainty about what the hypervisor is supposed to be doing.
+Every unfamiliar process becomes a suspect. Every unknown configuration
+file might be the cause. The time spent investigating red herrings is
+time not spent solving the actual problem.
+
+Documentation helps, but only if it's maintained rigorously - and it
+usually isn't. Services get installed during a late-night
+troubleshooting session and never documented. Configuration changes get
+made "`temporarily`" and become permanent. Over time, the gap between
+documentation and reality grows until the documentation is more
+misleading than helpful.
+
+==== The Right Architecture
+
+The solution is conceptually simple: maintain a clear separation between
+your infrastructure layer and your application layer.
+
+The infrastructure layer - Proxmox itself, the storage backends, the
+network configuration, the backup system - runs directly on the host
+because it has to. These components are what make virtualization
+possible.
+
+The application layer - web servers, databases, file services,
+monitoring systems, and everything else that serves your actual use
+cases - belongs in VMs or containers. These components use the
+infrastructure but shouldn't be part of it.
+
+This separation provides multiple benefits. Your hypervisor stays clean
+and predictable. Your applications get their own isolated environments
+where they can have whatever dependencies they need without affecting
+each other or the host. Upgrades on either layer become independent
+operations. Security boundaries exist between components. Backups are
+cleaner because application data is contained in VM images rather than
+scattered across the host filesystem.
+
+[source,bash]
+----
+# Check what's installed on your Proxmox host
+dpkg --get-selections | wc -l
+
+# Compare to a fresh installation to see what's been added
+# A fresh Proxmox 8 install has roughly 500-600 packages
+# Significantly more suggests accumulated software
+----
+
+==== What Actually Belongs on the Host
+
+Not everything beyond base Proxmox is inappropriate. Some tools
+genuinely belong on the hypervisor because they need direct access to
+hardware or kernel features that aren't available inside VMs.
+
+Hardware monitoring tools like `lm-sensors` for temperature readings or
+`smartmontools` for disk health need direct hardware access. These
+belong on the host.
+
+The Checkmk or other monitoring agents that report on the host's own
+health metrics need to run on the host to see host-level information.
+They belong on the host - but they should just be agents that report to
+a monitoring server running elsewhere, not the monitoring server itself.
+
+Storage utilities for managing ZFS, LVM, or other storage backends need
+to run on the host because they're managing host-level storage. They
+belong on the host.
+
+Basic network utilities for troubleshooting connectivity issues are
+reasonable to have available. Keep them minimal.
+
+The test is simple: does this tool need to be on the hypervisor to
+function? If a VM or container could run it equally well, that's where
+it should be.
+
+==== Migration Strategy
+
+If your Proxmox host has already accumulated services, migrating them
+away is worthwhile even though it requires effort. The process is
+straightforward, though it takes time.
+
+Inventory what's running on the host beyond base Proxmox. Check running
+processes, installed packages, listening ports, and cron jobs:
+
+[source,bash]
+----
+# What's listening on network ports?
+ss -tlnp
+
+# What services are enabled?
+systemctl list-unit-files --state=enabled
+
+# What cron jobs exist?
+ls -la /etc/cron.* && crontab -l
+
+# What packages are installed that aren't Proxmox dependencies?
+apt-mark showmanual
+----
+
+For each identified service, create an appropriate new home. Lightweight
+services often fit well in LXC containers; more complex applications or
+anything requiring significant isolation belongs in a VM. Move the
+configuration and data, verify the service works in its new location,
+then remove it from the hypervisor.
+
+Take the opportunity to document each service as you migrate it. Why
+does this exist? Who uses it? What does it depend on? This documentation
+will be valuable going forward.
+
+==== LXC vs. VM: Choosing the Right Container
+
+Proxmox offers two isolation technologies for your application
+workloads, and choosing appropriately helps keep your infrastructure
+clean.
+
+https://linuxcontainers.org/[LXC containers] share the host kernel and
+provide lightweight isolation. They start quickly, use minimal overhead,
+and work well for services that don't need strong security isolation or
+kernel customization. A DNS server, a lightweight web proxy, or a file
+synchronization service are good LXC candidates.
+
+Virtual machines provide stronger isolation with their own kernel
+instance. They're appropriate for workloads that need specific kernel
+versions, run untrusted code, or require defense-in-depth security
+boundaries. Anything public-facing or security-sensitive generally
+belongs in a VM.
+
+When in doubt, use a VM. The resource overhead on modern hardware is
+minimal, and the stronger isolation is worth it for most use cases.
+
+[source,bash]
+----
+# Create a minimal LXC container for a lightweight service
+pct create 400 local:vztmpl/debian-12-standard_12.2-1_amd64.tar.zst \
+    --hostname internal-dns \
+    --memory 256 \
+    --cores 1 \
+    --net0 name=eth0,bridge=vmbr0,ip=dhcp \
+    --unprivileged 1
+----
+
+==== Best Practices
+
+Treat your Proxmox host as infrastructure, not as a general-purpose
+server. Its job is to run virtual machines and containers reliably.
+Everything else is a distraction that adds risk.
+
+Before installing anything on the host, ask whether it could run in a VM
+or container instead. If the answer is yes, put it there. The few
+minutes spent creating a container pays dividends in system cleanliness
+and upgrade safety.
+
+Document exceptions rigorously. If something genuinely needs to run on
+the host, document what it is, why it's there, and who's responsible for
+it. Review this documentation periodically and remove anything that's no
+longer needed.
+
+Keep the host updated independently from your application workloads.
+When Proxmox security updates are released, you should be able to apply
+them without worrying about breaking unrelated services.
+
+Plan for hypervisor replacement. If your Proxmox host died today and you
+had to rebuild it from scratch, how long would that take? A clean host
+with minimal customization can be rebuilt in an hour or two. A host with
+accumulated services and undocumented configurations might take days -
+if you can reconstruct it at all.
+
+==== The Bottom Line
+
+Your Proxmox hypervisor is the foundation that everything else depends
+on. Foundations should be stable, predictable, and well-understood.
+Every service you add directly to the host undermines these qualities,
+trading short-term convenience for long-term risk.
+
+Keep it clean. Keep it minimal. Let Proxmox do what it's designed to do
+- run your VMs and containers reliably - and put everything else where
+it belongs: inside those VMs and containers.
+
+'''''

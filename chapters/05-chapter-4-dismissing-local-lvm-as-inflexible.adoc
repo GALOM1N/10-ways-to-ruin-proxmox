@@ -1,0 +1,260 @@
+== Dismissing Local-LVM as "`Inflexible`"
+
+If you've been around the Proxmox community for a while, you've probably
+absorbed the conventional wisdom: Local-LVM is the boring default that
+serious admins replace with ZFS as soon as possible. Live migration is
+a pain, and honestly, it just feels a bit… legacy.
+
+For years, parts of this assessment were correct. But if you're still
+operating on that assumption in 2025, you might be making your
+infrastructure more complicated than it needs to be.
+
+==== Understanding What "`Local-LVM`" Actually Is
+
+Before we go further, let's clear up a common point of confusion. When
+people talk about "`Local-LVM`" in Proxmox, they're usually referring to
+the default `local-lvm` storage that the installer creates. This is
+actually *LVM-thin* - a thin-provisioned storage pool that has supported
+snapshots natively for years.
+
+The distinction matters because Proxmox VE 9 introduced a new snapshot
+mechanism for a different type of storage: *thick-provisioned LVM*. This
+is the kind of LVM you'd typically use with iSCSI LUNs or Fibre Channel
+storage from a SAN. If you're running a standard single-node Proxmox
+installation with the default storage layout, the new feature doesn't
+change anything for you - your LVM-thin storage already handles
+snapshots just fine.
+
+==== The Old Reputation
+
+So where did Local-LVM's bad reputation come from? A few places:
+
+The most legitimate complaint was always about migration. Moving a VM
+from one node to another with local storage meant either shutting down
+the VM, copying the entire disk image, and starting it on the new node -
+or setting up shared storage just to avoid the hassle. For clusters
+where you needed flexibility, any local storage seemed like a dead end.
+
+There was also confusion about
+https://en.wikipedia.org/wiki/Logical_Volume_Manager_(Linux)#Snapshots[traditional
+LVM snapshots] - the old-style snapshots that used a copy-on-write
+mechanism with significant performance penalties. But LVM-thin snapshots
+work differently and don't suffer from the same issues. Many people
+conflated the two, assuming that "`LVM snapshots are problematic`"
+applied to their Proxmox setup when it didn't.
+
+So the community advice became: use ZFS for anything serious, or set up
+Ceph if you're building a proper cluster. Local storage was relegated to
+"`only if you really have to`" status.
+
+==== What Changed in Proxmox VE 9
+
+With the release of Proxmox VE 9, Proxmox introduced *Snapshots as
+Volume Chains* - a technology preview that brings snapshot support to
+thick-provisioned LVM storage. This is significant for enterprise
+environments using traditional SANs with iSCSI or Fibre Channel, where
+thick LVM on shared LUNs is common.
+
+Instead of relying on LVM's problematic native snapshot mechanism,
+Proxmox now creates qcow2-based volume chains on top of thick LVM
+volumes. This approach avoids the I/O penalties and dangerous
+space-exhaustion behavior of traditional LVM snapshots.
+
+For environments using thick LVM on shared storage, this is genuinely
+useful - you can now snapshot VMs on your SAN without depending on the
+storage array's native snapshot features.
+
+However, this feature comes with important caveats:
+
+* It's currently a *technology preview*, not fully production-hardened
+* Virtual disks must use *qcow2 format*, not raw - existing raw disks
+  need to be converted
+* Each snapshot allocates a *full-sized thick volume* on the underlying
+  storage
+* Only *linear snapshot chains* are supported - you can only roll back
+  to the most recent snapshot, not to arbitrary points in history
+* Some configurations don't work yet, notably VMs with TPM devices
+* The qcow2 layer adds *performance overhead* - benchmarks suggest
+  30-50% impact in some workloads, though this varies
+* The feature must be explicitly enabled with `snapshot-as-volume-chain 1`
+  in your storage configuration
+
+For the default LVM-thin storage that most single-node Proxmox
+installations use, none of this is relevant - LVM-thin already handles
+snapshots natively and efficiently, without these limitations.
+
+==== Live Migration: Still a Consideration
+
+Let's be honest about what hasn't changed: live migration with local
+storage is still not as smooth as with shared storage. When you migrate
+a VM between nodes with local storage, Proxmox needs to copy the disk
+data over the network while the VM continues running. This works, and it
+works reliably, but it's inherently slower than the near-instantaneous
+migrations you get when both nodes access the same shared storage
+backend.
+
+For a homelab or small business environment where you might migrate VMs
+a few times a year during maintenance windows, this is perfectly
+acceptable. For a busy production cluster where you're constantly
+rebalancing workloads or need sub-second failover, you'll still want
+shared storage or ZFS replication.
+
+The key insight is that *not every environment needs the same
+capabilities*. The question isn't whether shared storage is better for
+migrations - of course it is - but whether the added complexity is
+justified for your specific use case.
+
+==== The Simplicity Advantage
+
+There's something to be said for keeping things simple, and LVM-thin
+excels at simplicity. There's no separate storage system to understand,
+no ARC tuning to worry about, no memory planning beyond what your VMs
+need. It uses the storage stack that Linux has relied on for decades,
+which means troubleshooting is straightforward and documentation is
+abundant.
+
+For single-node setups especially, this simplicity translates directly
+into reliability. Fewer moving parts means fewer things that can break,
+and when something does go wrong, the debugging process is more
+straightforward. You're not wondering whether the problem is in ZFS, the
+ARC, the L2ARC, the SLOG, or somewhere else entirely - you're working
+with a storage stack that behaves predictably and has well-understood
+failure modes.
+
+This isn't to say that ZFS's additional features aren't valuable - they
+absolutely are, in the right context. But features you don't need aren't
+free; they come with cognitive overhead, additional configuration, and
+more potential failure points.
+
+==== Making the Choice
+
+The decision between LVM-based storage and ZFS (or other backends)
+should be based on your actual requirements, not on what feels more
+"`professional`" or what the forums recommend by default.
+
+*LVM-thin (the default local-lvm) makes sense when:*
+
+You're running a single-node setup where migration isn't a concern, or
+you're building a small cluster where occasional slower migrations
+during maintenance windows are acceptable. It's also a solid choice when
+you want to keep your Proxmox host as simple as possible, perhaps
+because you're already running a separate NAS for bulk storage and don't
+need ZFS's data management features on the hypervisor itself. You get
+native snapshot support without any special configuration.
+
+*Thick LVM on shared storage makes sense when:*
+
+You have an existing SAN infrastructure with iSCSI or Fibre Channel and
+want to leverage it for Proxmox. With Proxmox VE 9's new snapshot
+feature, you can now get basic snapshot functionality on these
+environments - just be aware of the technology preview status and
+limitations.
+
+*ZFS (or Ceph) makes sense when:*
+
+You need frequent live migrations with minimal disruption, your data
+integrity requirements justify the additional complexity, or you want
+built-in features like compression, checksumming, native replication, or
+the ability to easily expand storage with additional vdevs. Clusters
+with three or more nodes that require true high availability will
+generally benefit from shared storage regardless of the underlying
+technology.
+
+==== Checking Your Current Setup
+
+If you're not sure what storage backend you're currently using, Proxmox
+makes it easy to check:
+
+[source,bash]
+----
+# List all configured storage
+pvesm status
+
+# Show detailed storage configuration
+cat /etc/pve/storage.cfg
+----
+
+Look for `lvmthin:` entries (that's LVM-thin with native snapshot
+support) versus `lvm:` entries (that's thick LVM, which needs the new
+volume-chain feature for snapshots).
+
+And if you want to see how your VMs' disks are actually allocated:
+
+[source,bash]
+----
+# List logical volumes (for LVM-based storage)
+lvs
+
+# Show detailed info about a specific volume
+lvdisplay /dev/pve/vm-100-disk-0
+
+# Check if you're using thin pools
+lvs -o+pool_lv
+----
+
+==== Enabling Snapshots on Thick LVM (If Needed)
+
+If you're using thick LVM storage (typically on shared SAN LUNs) and
+want to try the new snapshot feature, you'll need to:
+
+1. Add `snapshot-as-volume-chain 1` to your storage configuration in
+   `/etc/pve/storage.cfg`
+2. Create new VMs with qcow2 format disks, or convert existing raw disks
+3. Be aware that this is a technology preview with the limitations
+   mentioned earlier
+
+[source,bash]
+----
+# Example storage.cfg entry for thick LVM with snapshots
+lvm: san-storage
+    vgname my-san-vg
+    content images,rootdir
+    shared 1
+    snapshot-as-volume-chain 1
+----
+
+==== Best Practices
+
+Rather than following blanket recommendations, take the time to evaluate
+what your environment actually needs:
+
+*For single-node setups:* The default LVM-thin storage is genuinely
+capable. You get snapshots, thin provisioning, and straightforward
+management. Don't add ZFS complexity unless you specifically need its
+features like checksumming, compression, or native replication.
+
+*For small clusters:* Think carefully about your migration patterns. How
+often do you actually need to move VMs between nodes? Can those
+migrations happen during maintenance windows, or do they need to be
+seamless and immediate? For environments where frequent, fast migrations
+are essential, ZFS replication or shared storage like Ceph remains the
+better choice - but don't add that complexity if you don't need it.
+
+*For enterprise SAN environments:* The new thick LVM snapshot feature in
+Proxmox VE 9 is worth evaluating, but treat it as what it is - a
+technology preview. Test thoroughly before relying on it in production,
+and keep an eye on the Proxmox release notes for improvements and bug
+fixes.
+
+Whatever you choose, make the decision consciously rather than
+defaulting to whatever seems most sophisticated. The best storage
+architecture is the one that meets your requirements with the least
+unnecessary complexity.
+
+==== The Bottom Line
+
+The reputation of LVM-based storage in Proxmox deserves
+reconsideration. The default LVM-thin storage has always been more
+capable than many give it credit for - it's had working snapshots all
+along. For thick LVM users on traditional SANs, Proxmox VE 9 brings new
+snapshot capabilities, though still as a technology preview with some
+limitations.
+
+For many environments - particularly single-node setups and small
+clusters with modest migration needs - LVM-thin is a perfectly
+respectable choice that's simpler to manage than ZFS. Don't let old
+forum posts and outdated conventional wisdom push you toward complexity
+you don't need. Evaluate your actual requirements, and choose
+accordingly.
+
+'''''
