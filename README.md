@@ -54,7 +54,7 @@ The book is written in **AsciiDoc**. To generate the PDF yourself:
 brew install asciidoctor
 
 # Or via Gems
-gem install asciidoctor-pdf
+gem install asciidoctor-pdf asciidoctor-epub3
 ```
 
 ### Compile
@@ -62,6 +62,9 @@ gem install asciidoctor-pdf
 ```bash
 # Generate PDF
 asciidoctor-pdf index.adoc -o "10_Ways_to_Ruin_Your_Proxmox_Setup.pdf"
+
+# Generate EPUB
+asciidoctor-epub3 index.adoc -o "10_Ways_to_Ruin_Your_Proxmox_Setup.epub"
 
 # Generate HTML
 asciidoctor index.adoc
